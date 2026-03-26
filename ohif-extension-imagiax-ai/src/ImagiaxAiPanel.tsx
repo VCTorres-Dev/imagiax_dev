@@ -572,8 +572,8 @@ const MedicalReportDocument = memo(({ patient, sections, informeId, qrDataUrl }:
 // ── ScaledPreview — definida FUERA del componente para evitar re-montaje ──────
 // Bug anterior: estaba dentro del render → nueva referencia en cada re-render → React desmontaba/remontaba el componente → parpadeo
 const ScaledPreview = memo(({ sec, pid, qr, pat }: { sec: ReportSection[]; pid: string; qr: string; pat: PatientInfo }) => (
-  <div style={{ overflow:'hidden', border:'1px solid #1e3a5f', borderRadius:'6px', backgroundColor:'#fff', height:'440px', position:'relative' }}>
-    <div style={{ transform:'scale(0.43)', transformOrigin:'top left', width:'233%', pointerEvents:'none' }}>
+  <div style={{ overflow:'hidden', border:'1px solid #1e3a5f', borderRadius:'6px', backgroundColor:'#fff', height:'500px', position:'relative' }}>
+    <div style={{ transform:'scale(0.46)', transformOrigin:'top left', width:'217%', pointerEvents:'none' }}>
       <MedicalReportDocument patient={pat} sections={sec} informeId={pid} qrDataUrl={qr} />
     </div>
   </div>
@@ -695,7 +695,7 @@ const HistoryCard = memo(({ entry, onView, onDownloadPdf }: { entry: HistoryEntr
         overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{entry.patient.nombre}</div>
       <div style={{ color:'#64748b', fontSize:'10px', marginBottom:'2px' }}>{entry.patient.tipoExamen}</div>
       <div style={{ color:'#475569', fontSize:'10px' }}>
-        {entry.fecha} · <span style={{ color:'#3b82f6' }}>{entry.informeId}</span>
+        {entry.fecha} · <span style={{ color:'#3b82f6' }}>{entry.informeId.length > 10 ? entry.informeId.substring(0, 8).toUpperCase() + '…' : entry.informeId.toUpperCase()}</span>
       </div>
     </div>
     <div style={{ display:'flex', gap:'6px', flexShrink:0 }}>
@@ -1157,7 +1157,6 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
             padding:'14px 16px', display:'flex', flexDirection:'column', gap:'8px' }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
               <span style={{ color:'#475569', fontSize:'9px', fontWeight:'700', textTransform:'uppercase', letterSpacing:'0.5px' }}>Estudio activo</span>
-              <span style={{ color:'#1e3a5f', fontSize:'8px', fontFamily:'monospace' }}>DICOM</span>
             </div>
             {patient.nombre && (
               <div style={{ color:'#f1f5f9', fontSize:'14px', fontWeight:'700', lineHeight:'1.3' }}>
@@ -1168,14 +1167,6 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
             <div style={{ display:'flex', gap:'12px', flexWrap:'wrap', lineHeight:'1.5' }}>
               {patient.rut && <span style={{ color:'#94a3b8', fontSize:'11px' }}>ID: {patient.rut}</span>}
               {patient.tipoExamen && <span style={{ color:'#64748b', fontSize:'11px' }}>{patient.tipoExamen}</span>}
-            </div>
-            {/* StudyUID con truncado y tooltip */}
-            <div
-              title={studyUID}
-              style={{ color:'#475569', fontSize:'9px', fontFamily:'monospace', marginTop:'2px',
-                overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', lineHeight:'1.5',
-                cursor:'help' }}>
-              {studyUID}
             </div>
           </div>
         ) : (
@@ -1347,16 +1338,16 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
           {aiResultados.hallazgos_estudio.length > 0 ? (
             <div style={{ display:'flex', flexDirection:'column', gap:'3px', marginTop:'8px' }}>
               {aiResultados.hallazgos_estudio.map((h, i) => (
-                <div key={i} style={{ display:'flex', justifyContent:'space-between', alignItems:'center',
+                <div key={i} style={{ display:'flex', alignItems:'center', gap:'6px',
                   padding:'3px 8px', background:'rgba(0,0,0,0.2)', borderRadius:'3px' }}>
+                  <div style={{ width:'6px', height:'6px', borderRadius:'50%', flexShrink:0,
+                    background: h.probabilidad_pct_max >= 80 ? '#f87171' : h.probabilidad_pct_max >= 60 ? '#fbbf24' : '#60a5fa' }} />
                   <span style={{ color:'#e2e8f0', fontSize:'11px' }}>{h.patologia}</span>
-                  <span style={{ color: h.probabilidad_pct_max >= 80 ? '#f87171' : h.probabilidad_pct_max >= 60 ? '#fbbf24' : '#60a5fa',
-                    fontSize:'11px', fontWeight:'700', fontVariantNumeric:'tabular-nums' }}>{h.probabilidad_pct_max.toFixed(1)}%</span>
                 </div>
               ))}
             </div>
           ) : (
-            <div style={{ color:'#4ade80', fontSize:'11px', marginTop:'6px' }}>Sin hallazgos patologicos sobre umbrales clinicos</div>
+            <div style={{ color:'#4ade80', fontSize:'11px', marginTop:'6px' }}>Sin hallazgos patológicos relevantes</div>
           )}
           {aiResultados.errores && aiResultados.errores.length > 0 && (
             <div style={{ color:'#fbbf24', fontSize:'10px', marginTop:'4px', opacity:0.8 }}>
@@ -1368,7 +1359,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
 
       <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:'10px' }}>
         {/* Technical AI Report — collapsible to save space */}
-        <details open style={{ background:'#0d1420', border:'1px solid #1e3a5f', borderRadius:'8px', overflow:'hidden' }}>
+        <details style={{ background:'#0d1420', border:'1px solid #1e3a5f', borderRadius:'8px', overflow:'hidden' }}>
           <summary style={{ padding:'10px 14px', cursor:'pointer', userSelect:'none',
             display:'flex', alignItems:'center', gap:'8px', listStyle:'none',
             background:'#0d1420', borderBottom:'1px solid #1e293b' }}>
@@ -1395,93 +1386,6 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
                 Analisis generado con asistencia de IA (IMAGIAX). Debe ser validado por un medico calificado. No constituye diagnostico definitivo.
               </div>
             </div>
-          </div>
-        </details>
-
-        {/* V2 Experimental — NV-Reason-CXR-3B */}
-        <details style={{ background:'#0a0f1a', border:`1px solid ${v2Status === 'online' ? '#1e293b' : '#1a150a'}`, borderRadius:'8px', overflow:'hidden' }}>
-          <summary style={{ padding:'8px 12px', cursor:'pointer', userSelect:'none',
-            display:'flex', alignItems:'center', gap:'8px', listStyle:'none' }}>
-            <div style={{ width:'5px', height:'5px', borderRadius:'50%',
-              background: v2Status === 'online' ? '#22c55e' : '#ef4444',
-              boxShadow: v2Status === 'online' ? '0 0 4px #22c55e' : 'none' }} />
-            <span style={{ color:'#475569', fontSize:'9px', fontWeight:'700', textTransform:'uppercase', letterSpacing:'0.5px', flex:1 }}>
-              NV-Reason-CXR-3B
-            </span>
-            <span style={{ color:'#334155', fontSize:'8px', textTransform:'uppercase' }}>Experimental</span>
-          </summary>
-          <div style={{ borderTop:'1px solid #1e293b' }}>
-            {v2Status === 'offline' && (
-              <div style={{ padding:'8px 12px', color:'#64748b', fontSize:'10px' }}>
-                Servidor V2 no disponible (puerto 8011).
-              </div>
-            )}
-            {v2Status === 'online' && !v2Loading && !v2Result && (
-              <div style={{ padding:'8px 12px' }}>
-                <button onClick={handleCompararV2}
-                  style={{ background:'#1e293b', color:'#93c5fd', border:'1px solid #1e3a5f', borderRadius:'5px',
-                    padding:'5px 12px', fontSize:'10px', fontWeight:'600', cursor:'pointer', width:'100%' }}>
-                  Ejecutar comparacion
-                </button>
-              </div>
-            )}
-            {v2Loading && (
-              <div style={{ padding:'10px 12px', display:'flex', alignItems:'center', gap:'6px' }}>
-                <Spinner />
-                <span style={{ color:'#3b82f6', fontSize:'10px' }}>Procesando (~60s)...</span>
-              </div>
-            )}
-            {v2Error && (
-              <div style={{ padding:'8px 12px', color:'#f87171', fontSize:'10px', background:'#450a0a' }}>
-                {v2Error}
-              </div>
-            )}
-            {v2Result && (
-              <div style={{ padding:'10px 12px', display:'flex', flexDirection:'column', gap:'8px' }}>
-                <div>
-                  <div style={{ color:'#475569', fontSize:'9px', fontWeight:'700', textTransform:'uppercase', marginBottom:'3px' }}>
-                    Hallazgos CXR-3B (EN)
-                  </div>
-                  <div style={{ color:'#93c5fd', fontSize:'11px', lineHeight:'1.5' }}>
-                    {v2Result.v2_cxr3b.answer_en || 'No finding'}
-                  </div>
-                </div>
-                <div>
-                  <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'3px' }}>
-                    <span style={{ color:'#475569', fontSize:'9px', fontWeight:'700', textTransform:'uppercase' }}>
-                      Informe V2
-                    </span>
-                    <span style={{ color:'#334155', fontSize:'9px' }}>
-                      {v2Result.v2_cxr3b.latencia_inferencia_s + v2Result.v2_cxr3b.latencia_traduccion_s}s
-                    </span>
-                  </div>
-                  <div style={{ background:'#111827', borderRadius:'4px', padding:'8px', maxHeight:'120px', overflowY:'auto' }}>
-                    <pre style={{ color:'#cbd5e1', fontSize:'10px', lineHeight:'1.6', whiteSpace:'pre-wrap', margin:0, fontFamily:'inherit' }}>
-                      {v2Result.v2_cxr3b.informe_es}
-                    </pre>
-                  </div>
-                </div>
-                <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
-                  <span style={{ color:'#475569', fontSize:'9px', textTransform:'uppercase' }}>Triage:</span>
-                  <span style={{
-                    background: v2Result.v2_cxr3b.triage?.nivel_alerta === 'ALTA' ? '#dc2626' :
-                                v2Result.v2_cxr3b.triage?.nivel_alerta === 'MEDIA' ? '#f59e0b' :
-                                v2Result.v2_cxr3b.triage?.nivel_alerta === 'BAJA' ? '#3b82f6' : '#22c55e',
-                    color: v2Result.v2_cxr3b.triage?.nivel_alerta === 'MEDIA' ? '#000' : '#fff',
-                    padding:'1px 7px', borderRadius:'3px', fontSize:'10px', fontWeight:'700' }}>
-                    {v2Result.v2_cxr3b.triage?.nivel_alerta ?? '—'}
-                  </span>
-                  <span style={{ color:'#334155', fontSize:'9px' }}>
-                    {v2Result.latencia_total_comparacion_s}s
-                  </span>
-                </div>
-                <button onClick={() => { setV2Result(null); setV2Error(''); }}
-                  style={{ background:'transparent', color:'#334155', border:'1px solid #1e293b', borderRadius:'4px',
-                    padding:'4px', fontSize:'9px', cursor:'pointer', alignSelf:'flex-end' }}>
-                  Cerrar
-                </button>
-              </div>
-            )}
           </div>
         </details>
 
@@ -1520,7 +1424,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
             <button onClick={handleRechazar} title="Rechazar informe"
               style={{ background:'#111827', color:'#64748b', border:'1px solid #1e293b', borderRadius:'6px',
                 padding:'11px 14px', fontSize:'11px', cursor:'pointer' }}>
-              x
+              Descartar
             </button>
           </div>
         ) : (
@@ -1629,7 +1533,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
           </button>
           <div style={{ background:'#0d1420', border:'1px solid #1e3a5f', borderRadius:'6px', padding:'10px 12px', marginBottom:'-4px' }}>
             <div style={{ color:'#f1f5f9', fontSize:'12px', fontWeight:'600' }}>{viewingEntry.patient.nombre}</div>
-            <div style={{ color:'#64748b', fontSize:'10px', marginTop:'2px' }}>{viewingEntry.informeId} · {viewingEntry.fecha}</div>
+            <div style={{ color:'#64748b', fontSize:'10px', marginTop:'2px' }}>Informe {viewingEntry.informeId.length > 10 ? viewingEntry.informeId.substring(0, 8).toUpperCase() + '…' : viewingEntry.informeId.toUpperCase()} · {viewingEntry.fecha}</div>
           </div>
           <ScaledPreview sec={viewingEntry.sections} pid={viewingEntry.informeId} qr={viewingEntry.qrDataUrl} pat={viewingEntry.patient} />
           {viewingEntry.sections?.length > 0 && (
