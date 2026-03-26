@@ -1,0 +1,49 @@
+# IMAGIAX - Stack de infraestructura local para desarrollo
+#
+# Servicios:
+#   orthanc   → PACS con DICOMweb para OHIF         :8042
+#   postgres  → Base de datos de informes médicos   :5432
+#
+# Uso:
+#   docker compose up -d
+#   Orthanc UI: http://localhost:8042
+#   OHIF Viewer: yarn run dev:orthanc (desde platform/app)
+#   API IA: uvicorn servidor_api_orthanc_v1:app --port 8010
+
+services:
+  orthanc:
+    image: jodogne/orthanc-plugins:latest
+    container_name: orthanc-imagiax
+    ports:
+      - "8042:8042"   # HTTP API + Web UI
+      - "4242:4242"   # DICOM port
+    volumes:
+      - ./config/orthanc.json:/etc/orthanc/orthanc.json:ro
+      - orthanc-data:/var/lib/orthanc/db/
+    restart: unless-stopped
+    environment:
+      - ORTHANC_NAME=IMAGIAX-PACS
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-imagiax
+    ports:
+      - "5432:5432"
+    volumes:
+      - imagiax-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=imagiax
+      - POSTGRES_USER=imagiax
+      - POSTGRES_PASSWORD=imagiax2024
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imagiax -d imagiax"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  orthanc-data:
+    driver: local
+  imagiax-pgdata:
+    driver: local

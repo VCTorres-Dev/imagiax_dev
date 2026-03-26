@@ -1,0 +1,38 @@
+# Datasets (varios GB)
+datos_nih/
+datos_hd/
+datos_medicos/
+rx tx_/
+RX Dicom Veridicos/
+
+# Python virtualenv
+env/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Modelos locales (el servidor descarga el suyo)
+*.pth
+
+# Node/OHIF (tiene su propio build context)
+OHIF Medical Imaging Viewer/
+
+# Git
+.git/
+.gitignore
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Experimental
+v2_experimental/
+
+# Env files (se montan via env_file en compose)
+.env
+.env.production

@@ -1,0 +1,36 @@
+{
+  "name": "@ohif/extension-imagiax-ai",
+  "version": "3.13.0-beta.28",
+  "description": "IMAGIAX AI integration panel for OHIF",
+  "author": "IMAGIAX",
+  "license": "MIT",
+  "repository": "OHIF/Viewers",
+  "main": "dist/ohif-extension-imagiax-ai.umd.js",
+  "module": "src/index.tsx",
+  "engines": {
+    "node": ">=14",
+    "npm": ">=6",
+    "yarn": ">=1.16.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "cross-env NODE_ENV=development webpack --config .webpack/webpack.dev.js --watch --output-pathinfo",
+    "build": "cross-env NODE_ENV=production webpack --config .webpack/webpack.prod.js",
+    "build:package-1": "yarn run build",
+    "start": "yarn run dev"
+  },
+  "peerDependencies": {
+    "@ohif/core": "3.13.0-beta.28",
+    "@ohif/ui": "3.13.0-beta.28",
+    "react": "18.3.1"
+  },
+  "dependencies": {
+    "@babel/runtime": "7.28.2",
+    "@types/qrcode": "^1.5.6",
+    "jspdf": "^4.2.0",
+    "qrcode": "^1.5.4"
+  }
+}
