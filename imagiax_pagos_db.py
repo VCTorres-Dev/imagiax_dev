@@ -22,6 +22,25 @@ import asyncpg
 
 logger = logging.getLogger("imagiax.pagos_db")
 
+# ── PCI Data Masking (SEC-PAY-009) ────────────────────────────────────────────
+_PCI_MASK_KEYS = frozenset({
+    "card_number", "card_holder_name", "card_detail",
+    "first_six_digits", "last_four_digits", "cvv", "pan",
+})
+
+
+def _mask_pci_data(data: Any) -> Any:
+    """Recursively masks PCI-sensitive fields before DB storage. (SEC-PAY-009)"""
+    if isinstance(data, dict):
+        return {
+            k: "***MASKED***" if k.lower() in _PCI_MASK_KEYS else _mask_pci_data(v)
+            for k, v in data.items()
+        }
+    if isinstance(data, list):
+        return [_mask_pci_data(item) for item in data]
+    return data
+
+
 # ── Pool compartido con imagiax_db ────────────────────────────────────────────
 # get_pool() se importa en tiempo de ejecución para evitar dependencia circular.
 
@@ -144,6 +163,19 @@ async def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_oneclick_username ON tarjetas_oneclick(username)"
         )
 
+        # ── Migraciones de aislamiento per-usuario ────────────────────────────
+        # Cada usuario tiene sus propios créditos, tarjetas y métodos de pago.
+        for migration_sql in [
+            "ALTER TABLE licencias ADD COLUMN IF NOT EXISTS usuario_id UUID",
+            "ALTER TABLE tarjetas_oneclick ADD COLUMN IF NOT EXISTS usuario_id UUID",
+            "CREATE INDEX IF NOT EXISTS idx_licencias_usuario ON licencias(usuario_id)",
+            "CREATE INDEX IF NOT EXISTS idx_oneclick_usuario ON tarjetas_oneclick(usuario_id)",
+        ]:
+            try:
+                await conn.execute(migration_sql)
+            except Exception:
+                pass  # Columna/índice ya existe
+
         # Pagos Transbank: log de transacciones Oneclick
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS pagos_tbk (
@@ -166,6 +198,16 @@ async def create_tables() -> None:
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pagos_tbk_created ON pagos_tbk(created_at DESC)"
         )
+
+        # Inscripciones TBK en curso: mapea TBK_TOKEN → usuario_id (10 min TTL)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tbk_pending (
+                tbk_token   TEXT PRIMARY KEY,
+                usuario_id  TEXT NOT NULL,
+                username    TEXT NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
 
         # Migración: corregir usernames con URL-encoding (%40 en lugar de @)
         fixed = await conn.execute(
@@ -237,69 +279,106 @@ async def set_config(clave: str, valor: str) -> None:
 CREDITOS_TRIAL = 5
 
 
-async def get_or_create_trial() -> dict[str, Any]:
+async def get_or_create_trial(usuario_id: str | None = None) -> dict[str, Any]:
     """
-    Retorna la licencia trial activa de esta instalación.
+    Retorna la licencia trial activa del usuario.
     Si no existe, la crea automáticamente con CREDITOS_TRIAL créditos.
+    Si usuario_id es None, usa el modelo legacy de instalación compartida.
     """
     pool = _get_pool()
+    _uid = uuid.UUID(usuario_id) if usuario_id else None
     async with pool.acquire() as conn:
-        # Buscar trial existente (sin cliente_id — pertenece a la instalación)
-        row = await conn.fetchrow(
-            """
-            SELECT * FROM licencias
-            WHERE tipo = 'trial'
-              AND cliente_id IS NULL
-              AND activa = TRUE
-            ORDER BY created_at ASC
-            LIMIT 1
-            """
-        )
+        if _uid:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM licencias
+                WHERE tipo = 'trial'
+                  AND usuario_id = $1
+                  AND activa = TRUE
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                _uid,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM licencias
+                WHERE tipo = 'trial'
+                  AND cliente_id IS NULL
+                  AND usuario_id IS NULL
+                  AND activa = TRUE
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            )
         if row:
             return _row_to_dict(row)
 
-        # Crear trial por primera vez
+        # Crear trial por primera vez para este usuario
         row = await conn.fetchrow(
             """
-            INSERT INTO licencias (tipo, creditos_total)
-            VALUES ('trial', $1)
+            INSERT INTO licencias (tipo, creditos_total, usuario_id)
+            VALUES ('trial', $1, $2)
             RETURNING *
             """,
             CREDITOS_TRIAL,
+            _uid,
         )
-        print(f"IMAGIAX Pagos: trial creado ({CREDITOS_TRIAL} créditos gratuitos).")
+        logger.info("Trial creado para usuario=%s (%d créditos)", usuario_id or "instalación", CREDITOS_TRIAL)
         return _row_to_dict(row)
 
 
 # ── Créditos disponibles (agregado de todas las licencias activas) ────────────
 
-async def get_estado_creditos() -> dict[str, Any]:
+async def get_estado_creditos(usuario_id: str | None = None) -> dict[str, Any]:
     """
-    Retorna el estado consolidado de créditos de esta instalación.
-    Incluye trial + packs comprados + suscripciones activas.
+    Retorna el estado consolidado de créditos del usuario.
+    Si usuario_id es None, usa el modelo legacy de instalación compartida.
     """
     pool = _get_pool()
+    _uid = uuid.UUID(usuario_id) if usuario_id else None
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, tipo, creditos_total, creditos_usados, activa,
-                   fecha_expiracion, created_at
-            FROM licencias
-            WHERE activa = TRUE
-              AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
-            ORDER BY
-                CASE tipo
-                    WHEN 'trial' THEN 3
-                    WHEN 'suscripcion_mensual' THEN 1
-                    ELSE 2
-                END,
-                created_at ASC
-            """
-        )
+        if _uid:
+            rows = await conn.fetch(
+                """
+                SELECT id, tipo, creditos_total, creditos_usados, activa,
+                       fecha_expiracion, created_at
+                FROM licencias
+                WHERE activa = TRUE
+                  AND usuario_id = $1
+                  AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
+                ORDER BY
+                    CASE tipo
+                        WHEN 'trial' THEN 3
+                        WHEN 'suscripcion_mensual' THEN 1
+                        ELSE 2
+                    END,
+                    created_at ASC
+                """,
+                _uid,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, tipo, creditos_total, creditos_usados, activa,
+                       fecha_expiracion, created_at
+                FROM licencias
+                WHERE activa = TRUE
+                  AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
+                ORDER BY
+                    CASE tipo
+                        WHEN 'trial' THEN 3
+                        WHEN 'suscripcion_mensual' THEN 1
+                        ELSE 2
+                    END,
+                    created_at ASC
+                """
+            )
 
     if not rows:
-        # No hay ninguna licencia activa — crear trial
-        trial = await get_or_create_trial()
+        # No hay ninguna licencia activa — crear trial para este usuario
+        trial = await get_or_create_trial(usuario_id=usuario_id)
         rows_data = [trial]
     else:
         rows_data = [_row_to_dict(r) for r in rows]
@@ -311,12 +390,12 @@ async def get_estado_creditos() -> dict[str, Any]:
     es_solo_trial = all(r["tipo"] == "trial" for r in rows_data)
     tiene_suscripcion = any(str(r["tipo"]).startswith("suscripcion_") for r in rows_data)
 
-    # Verificar si hay tarjeta registrada para cobro automático
-    metodo = await get_metodo_pago()
+    # Verificar si hay tarjeta registrada para cobro automático (per-usuario)
+    metodo = await get_metodo_pago(usuario_id=usuario_id)
     tiene_tarjeta = metodo is not None
 
-    # Verificar si hay inscripción Oneclick (Transbank) — prioridad sobre MP
-    oneclick = await get_inscripcion_oneclick_any()
+    # Verificar si hay inscripción Oneclick (Transbank) — prioridad sobre MP (per-usuario)
+    oneclick = await get_inscripcion_oneclick_any(usuario_id=usuario_id)
     tiene_oneclick = oneclick is not None
 
     return {
@@ -340,33 +419,55 @@ async def get_estado_creditos() -> dict[str, Any]:
     }
 
 
-async def descontar_credito() -> bool:
+async def descontar_credito(usuario_id: str | None = None) -> bool:
     """
-    Descuenta 1 crédito de la licencia más prioritaria con saldo disponible.
+    Descuenta 1 crédito de la licencia más prioritaria con saldo disponible del usuario.
     Prioridad: suscripción > packs comprados > trial.
     Retorna True si se descontó con éxito, False si sin créditos.
     """
     try:
         pool = _get_pool()
+        _uid = uuid.UUID(usuario_id) if usuario_id else None
         async with pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow(
-                    """
-                    SELECT id FROM licencias
-                    WHERE activa = TRUE
-                      AND creditos_usados < creditos_total
-                      AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
-                    ORDER BY
-                        CASE tipo
-                            WHEN 'suscripcion_mensual' THEN 1
-                            WHEN 'trial' THEN 3
-                            ELSE 2
-                        END,
-                        created_at ASC
-                    LIMIT 1
-                    FOR UPDATE SKIP LOCKED
-                    """
-                )
+                if _uid:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT id FROM licencias
+                        WHERE activa = TRUE
+                          AND usuario_id = $1
+                          AND creditos_usados < creditos_total
+                          AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
+                        ORDER BY
+                            CASE tipo
+                                WHEN 'suscripcion_mensual' THEN 1
+                                WHEN 'trial' THEN 3
+                                ELSE 2
+                            END,
+                            created_at ASC
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                        """,
+                        _uid,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT id FROM licencias
+                        WHERE activa = TRUE
+                          AND creditos_usados < creditos_total
+                          AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
+                        ORDER BY
+                            CASE tipo
+                                WHEN 'suscripcion_mensual' THEN 1
+                                WHEN 'trial' THEN 3
+                                ELSE 2
+                            END,
+                            created_at ASC
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                        """
+                    )
                 if not row:
                     return False
 
@@ -382,26 +483,36 @@ async def descontar_credito() -> bool:
 
 # ── Método de pago (tarjeta guardada para cobros automáticos) ─────────────────
 
-async def get_metodo_pago() -> dict[str, Any] | None:
+def _mp_card_keys(usuario_id: str | None) -> tuple[str, str, str, str, str]:
+    """Retorna las 5 claves de configuracion para la tarjeta MP de un usuario."""
+    suffix = f":{usuario_id}" if usuario_id else ""
+    return (
+        f"mp_customer_id{suffix}",
+        f"mp_card_id{suffix}",
+        f"mp_card_last4{suffix}",
+        f"mp_card_brand{suffix}",
+        f"metodo_pago_email{suffix}",
+    )
+
+
+async def get_metodo_pago(usuario_id: str | None = None) -> dict[str, Any] | None:
     """
-    Retorna la tarjeta guardada para cobros automáticos, o None si no hay.
-    La info se persiste en la tabla configuracion con claves prefijadas 'mp_card*'.
+    Retorna la tarjeta guardada para cobros automáticos del usuario, o None si no hay.
+    Cada usuario tiene sus propias claves prefijadas con su usuario_id.
     """
     try:
         pool = _get_pool()
+        keys = _mp_card_keys(usuario_id)
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                """
-                SELECT clave, valor FROM configuracion
-                WHERE clave IN (
-                    'mp_customer_id', 'mp_card_id', 'mp_card_last4',
-                    'mp_card_brand', 'metodo_pago_email'
-                )
-                """
+                "SELECT clave, valor FROM configuracion WHERE clave = ANY($1::text[])",
+                list(keys),
             )
         if not rows:
             return None
-        data = {r["clave"]: r["valor"] for r in rows}
+        # Normalizar claves removiendo el sufijo del usuario_id para acceso uniforme
+        suffix = f":{usuario_id}" if usuario_id else ""
+        data = {r["clave"].replace(suffix, ""): r["valor"] for r in rows}
         if not data.get("mp_customer_id") or not data.get("mp_card_id"):
             return None
         return {
@@ -423,31 +534,49 @@ async def guardar_metodo_pago(
     card_last4: str,
     card_brand: str,
     email: str,
+    usuario_id: str | None = None,
 ) -> None:
-    """Persiste los datos de la tarjeta en configuracion para cobros automáticos."""
-    for clave, valor in [
-        ("mp_customer_id",    mp_customer_id),
-        ("mp_card_id",        mp_card_id),
-        ("mp_card_last4",     card_last4),
-        ("mp_card_brand",     card_brand),
-        ("metodo_pago_email", email),
-    ]:
+    """Persiste los datos de la tarjeta del usuario en configuracion."""
+    keys = _mp_card_keys(usuario_id)
+    for clave, valor in zip(keys, [mp_customer_id, mp_card_id, card_last4, card_brand, email]):
         await set_config(clave, valor)
 
 
-async def borrar_metodo_pago() -> None:
-    """Elimina la tarjeta guardada (el médico puede registrar una nueva)."""
+async def borrar_metodo_pago(usuario_id: str | None = None) -> None:
+    """Elimina la tarjeta guardada del usuario."""
+    pool = _get_pool()
+    keys = list(_mp_card_keys(usuario_id))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM configuracion WHERE clave = ANY($1::text[])",
+            keys,
+        )
+
+
+# ── TBK Pending (mapeo seguro TBK_TOKEN → usuario_id) ────────────────────────
+
+async def tbk_pending_save(tbk_token: str, usuario_id: str, username: str) -> None:
+    """Guarda la relación TBK_TOKEN → usuario_id antes del redirect a Transbank."""
     pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            """
-            DELETE FROM configuracion
-            WHERE clave IN (
-                'mp_customer_id', 'mp_card_id', 'mp_card_last4',
-                'mp_card_brand', 'metodo_pago_email'
-            )
-            """
+            "INSERT INTO tbk_pending (tbk_token, usuario_id, username) "
+            "VALUES ($1, $2, $3) ON CONFLICT (tbk_token) DO UPDATE "
+            "SET usuario_id=$2, username=$3, created_at=NOW()",
+            tbk_token, usuario_id, username,
         )
+
+
+async def tbk_pending_pop(tbk_token: str) -> dict[str, str] | None:
+    """Recupera y elimina el registro pendiente para el token dado (uso único, TTL 10 min)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM tbk_pending WHERE tbk_token = $1 "
+            "AND created_at > NOW() - INTERVAL '10 minutes' RETURNING usuario_id, username",
+            tbk_token,
+        )
+        return dict(row) if row else None
 
 
 # ── Tarjetas Oneclick (Transbank) ─────────────────────────────────────────────
@@ -460,27 +589,30 @@ async def guardar_inscripcion_oneclick(
     card_number_last4: str | None = None,
     authorization_code: str | None = None,
     email: str | None = None,
+    usuario_id: str | None = None,
 ) -> None:
     """Guarda o actualiza la inscripción Oneclick de un usuario."""
     from urllib.parse import unquote
     username = unquote(username)  # Prevenir %40 en lugar de @
+    _uid = uuid.UUID(usuario_id) if usuario_id else None
     pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO tarjetas_oneclick
-                (username, tbk_user, card_type, card_number_last4, authorization_code, email)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (username, tbk_user, card_type, card_number_last4, authorization_code, email, usuario_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (username) DO UPDATE SET
                 tbk_user = EXCLUDED.tbk_user,
                 card_type = EXCLUDED.card_type,
                 card_number_last4 = EXCLUDED.card_number_last4,
                 authorization_code = EXCLUDED.authorization_code,
                 email = COALESCE(EXCLUDED.email, tarjetas_oneclick.email),
+                usuario_id = COALESCE(EXCLUDED.usuario_id, tarjetas_oneclick.usuario_id),
                 activa = TRUE,
                 created_at = NOW()
             """,
-            username, tbk_user, card_type, card_number_last4, authorization_code, email,
+            username, tbk_user, card_type, card_number_last4, authorization_code, email, _uid,
         )
 
 
@@ -506,21 +638,38 @@ async def get_inscripcion_oneclick(username: str) -> dict[str, Any] | None:
         return None
 
 
-async def get_inscripcion_oneclick_any() -> dict[str, Any] | None:
-    """Retorna la primera inscripción Oneclick activa (mono-usuario)."""
+async def get_inscripcion_oneclick_any(usuario_id: str | None = None) -> dict[str, Any] | None:
+    """
+    Retorna la inscripción Oneclick activa del usuario especificado.
+    Si usuario_id es None, usa modelo legacy (primera activa — solo para compatibilidad).
+    """
     try:
         pool = _get_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT username, tbk_user, card_type, card_number_last4,
-                       authorization_code, email, activa, created_at
-                FROM tarjetas_oneclick
-                WHERE activa = TRUE
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            )
+            if usuario_id:
+                _uid = uuid.UUID(usuario_id)
+                row = await conn.fetchrow(
+                    """
+                    SELECT username, tbk_user, card_type, card_number_last4,
+                           authorization_code, email, activa, created_at
+                    FROM tarjetas_oneclick
+                    WHERE activa = TRUE AND usuario_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    _uid,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT username, tbk_user, card_type, card_number_last4,
+                           authorization_code, email, activa, created_at
+                    FROM tarjetas_oneclick
+                    WHERE activa = TRUE
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
         if not row:
             return None
         return dict(row)
@@ -564,7 +713,7 @@ async def registrar_pago_tbk(
                 """,
                 username, buy_order, child_buy_order, authorization_code,
                 amount, installments_number, status, response_code,
-                json.dumps(raw_response) if raw_response else None,
+                json.dumps(_mask_pci_data(raw_response)) if raw_response else None,  # SEC-PAY-009
             )
     except Exception as exc:
         logger.error("Error registrando pago TBK: %s", exc)
@@ -610,42 +759,45 @@ async def acreditar_pago(
     mp_preference_id: str | None = None,
     mp_preapproval_id: str | None = None,
     duracion_dias: int | None = None,
+    usuario_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Crea una nueva licencia con créditos después de un pago aprobado.
-    Idempotente: si ya existe una licencia para este mp_payment_id, la retorna.
+    Idempotente: usa INSERT ON CONFLICT DO NOTHING RETURNING para atomicidad (SEC-PAY-005, AD-5).
+    Elimina TOCTOU race condition del SELECT-then-INSERT pattern anterior.
     """
     pool = _get_pool()
+    fecha_exp = None
+    if duracion_dias:
+        fecha_exp = datetime.now(timezone.utc) + timedelta(days=duracion_dias)
+
+    _uid = uuid.UUID(usuario_id) if usuario_id else None
     async with pool.acquire() as conn:
-        # Idempotencia: verificar si ya fue procesado
-        if mp_payment_id:
-            existing = await conn.fetchrow(
-                "SELECT * FROM licencias WHERE mp_payment_id = $1",
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO licencias
+                    (cliente_id, tipo, creditos_total, mp_payment_id,
+                     mp_preference_id, mp_preapproval_id, fecha_expiracion, usuario_id)
+                VALUES (, , , , , , , )
+                ON CONFLICT (mp_payment_id) DO NOTHING
+                RETURNING *
+                """,
+                uuid.UUID(cliente_id),
+                tipo,
+                creditos,
                 mp_payment_id,
+                mp_preference_id,
+                mp_preapproval_id,
+                fecha_exp,
+                _uid,
             )
-            if existing:
-                return _row_to_dict(existing)
-
-        fecha_exp = None
-        if duracion_dias:
-            fecha_exp = datetime.now(timezone.utc) + timedelta(days=duracion_dias)
-
-        row = await conn.fetchrow(
-            """
-            INSERT INTO licencias
-                (cliente_id, tipo, creditos_total, mp_payment_id,
-                 mp_preference_id, mp_preapproval_id, fecha_expiracion)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING *
-            """,
-            uuid.UUID(cliente_id),
-            tipo,
-            creditos,
-            mp_payment_id,
-            mp_preference_id,
-            mp_preapproval_id,
-            fecha_exp,
-        )
+            if row is None:
+                # Already processed (idempotent) — fetch the existing row
+                row = await conn.fetchrow(
+                    "SELECT * FROM licencias WHERE mp_payment_id = ",
+                    mp_payment_id,
+                )
     return _row_to_dict(row)
 
 
@@ -743,7 +895,7 @@ async def registrar_pago(
             estado,
             monto_clp,
             descripcion,
-            json.dumps(raw_webhook, ensure_ascii=False, default=str) if raw_webhook else None,
+            json.dumps(_mask_pci_data(raw_webhook), ensure_ascii=False, default=str) if raw_webhook else None,  # SEC-PAY-009
         )
     return str(row["id"])
 
@@ -979,20 +1131,33 @@ async def get_consumo_reciente(limite: int = 5) -> list[dict[str, Any]]:
         return []
 
 
-async def get_suscripcion_activa() -> dict[str, Any] | None:
-    """Obtiene la suscripción activa más reciente sin modificar estado."""
+async def get_suscripcion_activa(usuario_id: str | None = None) -> dict[str, Any] | None:
+    """Obtiene la suscripción activa del usuario sin modificar estado."""
     pool = _get_pool()
+    _uid = uuid.UUID(usuario_id) if usuario_id else None
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT id, tipo, mp_preapproval_id, activa, created_at
-                FROM licencias
-                WHERE activa = TRUE AND tipo LIKE 'suscripcion_%'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            )
+            if _uid:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, tipo, mp_preapproval_id, activa, created_at
+                    FROM licencias
+                    WHERE activa = TRUE AND tipo LIKE 'suscripcion_%' AND usuario_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    _uid,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, tipo, mp_preapproval_id, activa, created_at
+                    FROM licencias
+                    WHERE activa = TRUE AND tipo LIKE 'suscripcion_%'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
         return _row_to_dict(row) if row else None
     except Exception as exc:
         logger.error("Error obteniendo suscripcion activa: %s", exc)

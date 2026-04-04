@@ -23,6 +23,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -36,14 +37,16 @@ import skimage.transform
 import torch
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response, HTMLResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response, HTMLResponse, StreamingResponse
 from google import genai
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydicom.pixel_data_handlers.util import apply_modality_lut
 
 import imagiax_db
 import imagiax_pagos_db
+import imagiax_auth
+from imagiax_auth import get_current_user, UserPayload
 from pagos_mp import cobrar_scan_automatico, PRECIO_SCAN_CLP, router as pagos_router
 from pagos_tbk import cobrar_scan_oneclick, router as tbk_router
 from servidor_api_v6 import DEVICE, NIH_PATOLOGIAS, UMBRALES, get_model
@@ -116,8 +119,8 @@ IMAGIAX_BASE_URL = os.getenv("IMAGIAX_BASE_URL", "http://localhost:8010")
 class InstanciaRequest(BaseModel):
     """Analiza una instancia DICOM específica."""
 
-    orthanc_instance_id: str | None = None
-    sop_instance_uid: str | None = None
+    orthanc_instance_id: str | None = Field(default=None, max_length=128)  # SEC-AI-004
+    sop_instance_uid: str | None = Field(default=None, max_length=128)  # SEC-AI-004
 
     model_config = ConfigDict(extra="forbid")
 
@@ -131,7 +134,7 @@ class InstanciaRequest(BaseModel):
 class SerieRequest(BaseModel):
     """Analiza todas (o las primeras N) instancias de una serie."""
 
-    series_instance_uid: str
+    series_instance_uid: str = Field(max_length=128)  # SEC-AI-004
     max_instances: int = Field(default=10, ge=1, le=200)
 
     model_config = ConfigDict(extra="forbid")
@@ -140,7 +143,7 @@ class SerieRequest(BaseModel):
 class EstudioRequest(BaseModel):
     """Analiza todas (o las primeras N) instancias de un estudio."""
 
-    study_instance_uid: str
+    study_instance_uid: str = Field(max_length=128)  # SEC-AI-004
     max_instances: int = Field(default=20, ge=1, le=500)
     persistir_resultado: bool = True
 
@@ -150,8 +153,8 @@ class EstudioRequest(BaseModel):
 class GenerarInformeRequest(BaseModel):
     """Genera informe médico completo: análisis IA + redacción LLM + persistencia en DB."""
 
-    study_instance_uid: str
-    max_instances: int = Field(default=20, ge=1, le=500)
+    study_instance_uid: str = Field(max_length=128)  # SEC-AI-004
+    max_instances: int = Field(default=20, ge=1, le=50)  # SEC-AI-001: capped at 50
 
     model_config = ConfigDict(extra="forbid")
 
@@ -159,10 +162,10 @@ class GenerarInformeRequest(BaseModel):
 class GuardarDecisionRequest(BaseModel):
     """Registra la decisión del médico sobre un informe generado."""
 
-    informe_id: str
+    informe_id: str = Field(max_length=128)  # SEC-AI-004
     estado: str  # aceptado | rechazado | editado_aceptado
-    informe_final: str
-    notas_rechazo: str | None = None
+    informe_final: str = Field(max_length=50_000)  # SEC-AI-004: ~50k chars = informe médico real
+    notas_rechazo: str | None = Field(default=None, max_length=2_000)  # SEC-AI-004
 
     model_config = ConfigDict(extra="forbid")
 
@@ -205,6 +208,10 @@ async def _close_orthanc_client() -> None:
     if _orthanc_client is not None:
         await _orthanc_client.aclose()
         _orthanc_client = None
+
+
+# Cliente HTTP para proxy DICOMweb (SEC-BE-002, SEC-BE-003) — autenticado con Basic Auth
+_pacs_client: httpx.AsyncClient | None = None
 
 
 async def orthanc_get(path: str) -> httpx.Response:
@@ -469,6 +476,24 @@ async def lifespan(_: FastAPI):
     # 2) Inicializar cliente HTTP compartido para Orthanc
     await _init_orthanc_client()
 
+    # 2b) Inicializar cliente HTTP DICOMweb para proxy autenticado
+    global _pacs_client
+    _orthanc_auth = os.getenv("ORTHANC_AUTH_HEADER", "")
+    _pacs_headers = {"Authorization": f"Basic {_orthanc_auth}"} if _orthanc_auth else {}
+    _pacs_client = httpx.AsyncClient(
+        base_url=ORTHANC_BASE_URL,
+        timeout=httpx.Timeout(60.0),
+        headers=_pacs_headers,
+        limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+    )
+
+    # SEC-BE-008: CORS wildcard check — credentials + wildcard is forbidden
+    if "*" in _cors_origins:
+        raise RuntimeError(
+            "CORS_ORIGINS contains wildcard '*' — this is forbidden when allow_credentials=True. "
+            "Specify explicit origins in CORS_ORIGINS env var."
+        )
+
     # 3) Verificar conectividad Orthanc
     try:
         response = await orthanc_get("/system")
@@ -499,6 +524,8 @@ async def lifespan(_: FastAPI):
     yield
 
     # Cierre limpio
+    if _pacs_client is not None:
+        await _pacs_client.aclose()
     await _close_orthanc_client()
     await imagiax_db.close_pool()
 
@@ -540,7 +567,14 @@ async def rate_limit_middleware(request: Request, call_next):
                 {"detail": "Demasiadas solicitudes. Intenta en 1 minuto."},
                 status_code=429,
             )
-    return await call_next(request)
+    response = await call_next(request)
+    # SEC-BE-007: Content Security Policy header
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'"
+    )
+    return response
 
 
 @app.get("/salud")
@@ -661,6 +695,28 @@ async def salud() -> dict[str, Any]:
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
 
+
+
+# ── Endpoint de salud de la base de datos (SEC-BE-001, AD-1) ──────────────────
+@app.get("/health/db")
+async def health_db() -> JSONResponse:
+    """
+    Health check de la base de datos PostgreSQL.
+    NO expone detalles de excepción para evitar info leak (SEC-BE-001).
+    """
+    try:
+        pool = imagiax_db.get_pool()
+    except RuntimeError:
+        return JSONResponse(status_code=503, content={"ok": False, "database": "unavailable"})
+    try:
+        async with pool.acquire() as conn:
+            n = await conn.fetchval("SELECT 1")
+        if n != 1:
+            return JSONResponse(status_code=503, content={"ok": False, "database": "unhealthy"})
+        return JSONResponse(content={"ok": True, "database": "up"})
+    except Exception:
+        # SEC-BE-001: No exponer detalles de la excepción
+        return JSONResponse(status_code=503, content={"ok": False, "database": "unavailable"})
 
 # ── Favicon (evita 404 en navegadores) ────────────────────────────────────────
 _FAVICON_SVG = (
@@ -1595,8 +1651,14 @@ async def informes_por_estudio(study_instance_uid: str) -> JSONResponse:
 
 
 @app.get("/informes/{informe_id}/ver", response_class=HTMLResponse)
-async def ver_informe(informe_id: str) -> HTMLResponse:
-    """Página pública de verificación de informe. Destino del QR code impreso."""
+async def ver_informe(
+    informe_id: str,
+    user: UserPayload = Depends(get_current_user),
+) -> HTMLResponse:
+    """Página de verificación de informe. Requiere rol médico, admin o superadmin. (SEC-BE-006)"""
+    # SEC-BE-006: Role-based access — only doctors/admins can view reports
+    if user.rol not in ("medico", "admin", "superadmin"):
+        return HTMLResponse("Acceso denegado", status_code=403)
     try:
         informe = await imagiax_db.get_informe_por_id(informe_id)
     except Exception:
@@ -1678,7 +1740,7 @@ body{{font-family:'Inter',system-ui,sans-serif;background:#0a0f1e;color:#e2e8f0;
 @app.get("/informes/listado")
 async def listado_informes(
     estado: str | None = Query(default=None, description="Filtro: aceptado | rechazado | editado_aceptado | pendiente"),
-    limit: int = Query(default=100, ge=1, le=500, description="Máximo de resultados por página"),
+    limit: int = Query(default=50, ge=1, le=50, description="Máximo de resultados por página"),  # SEC-BE-009
     offset: int = Query(default=0, ge=0, description="Offset para paginación"),
 ) -> JSONResponse:
     """
@@ -1706,6 +1768,112 @@ async def listado_informes(
         "filtro_estado": estado,
     })
 
+
+
+# ── Path traversal protection (SEC-BE-003, AD-3) ──────────────────────────────
+_DICOMWEB_PATH_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._/:-]*$')
+
+
+def _sanitize_dicomweb_path(path: str) -> str:
+    """
+    Validates DICOMweb proxy path against a strict whitelist regex.
+    Raises HTTPException(400) on any violation (path traversal, absolute paths, etc.).
+    Valid DICOMweb paths: studies/X/series/Y/instances/Z/...
+    """
+    if '..' in path or path.startswith('/') or not _DICOMWEB_PATH_RE.match(path):
+        raise HTTPException(status_code=400, detail="Invalid DICOMweb path")
+    return path
+
+
+# ── Proxy DICOMweb autenticado — redirige /pacs/dicom-web/* a Orthanc ─────────
+@app.api_route("/pacs/dicom-web/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def pacs_dicom_proxy(
+    path: str,
+    request: Request,
+    response: Response,
+):
+    """
+    Proxy inverso DICOMweb protegido por cookie de sesión imagiax_session.
+
+    OHIF apunta a /pacs/dicom-web/* en lugar de hablar directo a Orthanc :8042,
+    eliminando la necesidad de exponer Orthanc al browser y evitando el popup
+    de Basic Auth nativo.
+
+    Seguridad:
+    - SEC-BE-002 (AD-2): decode_token() + is_user_revoked() en lugar de verify_session_cookie_token()
+    - SEC-BE-003 (AD-3): sanitize_dicomweb_path() antes de reenviar al PACS
+    """
+    # 1. Leer cookie de sesión
+    token = request.cookies.get("imagiax_session")
+    if not token:
+        return JSONResponse(status_code=401, content={"detail": "No autenticado"})
+
+    # 2. Validar token con decode_token (SEC-BE-002, AD-2) + revocation check
+    try:
+        proxy_user = imagiax_auth.decode_token(token)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"detail": "Sesión inválida"})
+
+    if await imagiax_auth.is_user_revoked(proxy_user.user_id):
+        return JSONResponse(status_code=401, content={"detail": "Cuenta revocada"})
+
+    # 3. Sanitizar path contra traversal (SEC-BE-003, AD-3)
+    try:
+        path = _sanitize_dicomweb_path(path)
+    except HTTPException:
+        return JSONResponse(status_code=400, content={"detail": "Invalid DICOMweb path"})
+
+    # 4. Construir URL upstream
+    qs = request.url.query
+    upstream_url = f"/dicom-web/{path}"
+    if qs:
+        upstream_url += f"?{qs}"
+
+    # 5. Reenviar headers seguros (no Host, no Authorization — la inyectamos nosotros)
+    SKIP_HEADERS = {"host", "authorization", "content-length", "transfer-encoding"}
+    fwd_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in SKIP_HEADERS
+    }
+
+    # 6. Leer body del request (para POST/PUT)
+    body = await request.body()
+
+    # 7. Stream de la respuesta desde Orthanc
+    if _pacs_client is None:
+        return JSONResponse(status_code=503, content={"detail": "Cliente PACS no inicializado"})
+
+    try:
+        upstream_req = _pacs_client.build_request(
+            method=request.method,
+            url=upstream_url,
+            headers=fwd_headers,
+            content=body if body else None,
+        )
+        upstream_response = await _pacs_client.send(upstream_req, stream=True)
+
+        # Generador async que itera los bytes Y cierra el stream al terminar
+        async def _stream_and_close():
+            try:
+                async for chunk in upstream_response.aiter_bytes():
+                    yield chunk
+            finally:
+                await upstream_response.aclose()
+
+        resp_headers = {
+            k: v for k, v in upstream_response.headers.items()
+            if k.lower() not in {"transfer-encoding", "content-encoding", "content-length"}
+        }
+        return StreamingResponse(
+            _stream_and_close(),
+            status_code=upstream_response.status_code,
+            headers=resp_headers,
+            media_type=upstream_response.headers.get("content-type", "application/octet-stream"),
+        )
+    except httpx.TimeoutException:
+        return JSONResponse(status_code=504, content={"detail": "Timeout conectando a PACS"})
+    except httpx.RequestError as e:
+        return JSONResponse(status_code=502, content={"detail": f"Error de conexión a PACS: {str(e)}"})
 
 if __name__ == "__main__":
     import uvicorn

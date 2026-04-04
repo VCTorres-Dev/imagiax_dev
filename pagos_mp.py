@@ -37,11 +37,12 @@ import uuid as _uuid_mod
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import imagiax_pagos_db
+from imagiax_auth import get_current_user, require_role, UserPayload
 
 load_dotenv()
 
@@ -54,8 +55,16 @@ IMAGIAX_BASE_URL: str = os.getenv("IMAGIAX_BASE_URL", "http://localhost:8010")
 # URL del visor OHIF. Local: http://localhost:3000 | Cloud: / (relativo, nginx enruta a OHIF)
 _VIEWER_URL: str = os.getenv("IMAGIAX_VIEWER_URL", "http://localhost:3000")
 
-# Usa sandbox_init_point en TEST, init_point en PROD
-_IS_TEST = MP_ACCESS_TOKEN.startswith("TEST-")
+# SEC-PAY-006: Use explicit IMAGIAX_PAYMENT_MODE env var instead of token prefix (AD-6)
+IMAGIAX_PAYMENT_MODE: str = os.getenv("IMAGIAX_PAYMENT_MODE", "testing")
+_IS_TEST = (IMAGIAX_PAYMENT_MODE != "production")
+
+# Startup cross-validation: production APP_ENV must use production payment mode
+if os.getenv("APP_ENV") == "production" and IMAGIAX_PAYMENT_MODE != "production":
+    raise RuntimeError(
+        "IMAGIAX_PAYMENT_MODE must be 'production' when APP_ENV=production. "
+        "Set IMAGIAX_PAYMENT_MODE=production in .env.production."
+    )
 
 # Secret para validar webhooks de MercadoPago (X-Signature header).
 # Obtener en: Panel MP → Webhooks → tu webhook → Secret key
@@ -121,13 +130,27 @@ router = APIRouter(tags=["Pagos MercadoPago"])
 # ── Helpers comunes ────────────────────────────────────────────────────────────
 
 def _parse_external_reference(raw_value: str) -> dict[str, Any]:
-    """Parsea external_reference de MP (JSON string) de forma segura."""
+    """
+    Parsea external_reference de MP (JSON string) de forma segura.
+    SEC-PAY-010: Validates that required fields (usuario_id, paquete) are present.
+    Logs and returns empty dict on malformed input.
+    """
     if not raw_value:
         return {}
     try:
-        return json.loads(raw_value) if raw_value.startswith("{") else {}
+        data = json.loads(raw_value) if raw_value.startswith("{") else {}
     except (json.JSONDecodeError, AttributeError):
+        logger.warning("external_reference malformado (no es JSON válido): %r", raw_value[:200])
         return {}
+    # SEC-PAY-010: Strict validation — must contain usuario_id
+    if not isinstance(data, dict):
+        logger.warning("external_reference no es un objeto JSON: %r", raw_value[:200])
+        return {}
+    if not data.get("usuario_id"):
+        logger.warning(
+            "external_reference sin usuario_id — posible manipulación: %r", raw_value[:200]
+        )
+    return data
 
 
 def _validar_webhook_signature(request: Request, body_bytes: bytes) -> bool:
@@ -138,10 +161,10 @@ def _validar_webhook_signature(request: Request, body_bytes: bytes) -> bool:
     Docs: https://www.mercadopago.com.ar/developers/es/docs/your-integrations/notifications/webhooks
     """
     if not MP_WEBHOOK_SECRET:
-        if _IS_TEST:
-            return True  # Aceptar en test sin secret configurado
-        logger.warning("MP_WEBHOOK_SECRET no configurado — webhook aceptado sin validar firma.")
-        return True  # Aceptar pero loguear (transitorio hasta producción)
+        # SEC-PAY-001: Siempre rechazar si no hay secret — sin excepcion para _IS_TEST
+        # MP sandbox soporta secrets reales; no hay razon para bypassear en test
+        logger.error("MP_WEBHOOK_SECRET no configurado — webhook rechazado por seguridad.")
+        return False
 
     x_signature = request.headers.get("x-signature", "")
     x_request_id = request.headers.get("x-request-id", "")
@@ -436,12 +459,12 @@ async def cobrar_scan_automatico(
 # ── Endpoint: Estado de créditos ───────────────────────────────────────────────
 
 @router.get("/pagos/estado")
-async def estado_creditos() -> JSONResponse:
+async def estado_creditos(user: UserPayload = Depends(get_current_user)) -> JSONResponse:
     """
     Retorna el estado de créditos de esta instalación IMAGIAX.
     Usado por el panel OHIF para mostrar el contador y activar el CTA de pago.
     """
-    estado = await imagiax_pagos_db.get_estado_creditos()
+    estado = await imagiax_pagos_db.get_estado_creditos(usuario_id=user.user_id)
     installation_id = await imagiax_pagos_db.get_or_create_installation_id()
     return JSONResponse({
         "installation_id": installation_id,
@@ -466,7 +489,7 @@ async def estado_creditos() -> JSONResponse:
 # ── Endpoint: Registrar tarjeta para cobros automáticos ───────────────────────
 
 @router.post("/pagos/registrar-tarjeta")
-async def registrar_tarjeta(body: RegistrarTarjetaRequest) -> JSONResponse:
+async def registrar_tarjeta(body: RegistrarTarjetaRequest, user: UserPayload = Depends(get_current_user)) -> JSONResponse:
     """
     Registra una tarjeta de crédito/débito para cobros automáticos de $990 CLP por scan.
 
@@ -514,6 +537,7 @@ async def registrar_tarjeta(body: RegistrarTarjetaRequest) -> JSONResponse:
         card_last4=card_last4,
         card_brand=card_brand,
         email=body.email,
+        usuario_id=user.user_id,
     )
 
     # 4. Crear/actualizar cliente en tabla clientes (para facturación futura)
@@ -536,10 +560,10 @@ async def registrar_tarjeta(body: RegistrarTarjetaRequest) -> JSONResponse:
 
 
 @router.get("/pagos/metodo-pago")
-async def get_metodo_pago_endpoint() -> JSONResponse:
+async def get_metodo_pago_endpoint(user: UserPayload = Depends(get_current_user)) -> JSONResponse:
     """Retorna la tarjeta registrada para cobros automáticos (Oneclick o MP)."""
     # Prioridad: Oneclick > MP
-    oneclick = await imagiax_pagos_db.get_inscripcion_oneclick_any()
+    oneclick = await imagiax_pagos_db.get_inscripcion_oneclick_any(usuario_id=user.user_id)
     if oneclick:
         return JSONResponse({
             "tiene_tarjeta": True,
@@ -549,7 +573,7 @@ async def get_metodo_pago_endpoint() -> JSONResponse:
             "email": oneclick.get("email", ""),
         })
 
-    metodo = await imagiax_pagos_db.get_metodo_pago()
+    metodo = await imagiax_pagos_db.get_metodo_pago(usuario_id=user.user_id)
     if not metodo:
         return JSONResponse({"tiene_tarjeta": False})
     return JSONResponse({
@@ -562,10 +586,10 @@ async def get_metodo_pago_endpoint() -> JSONResponse:
 
 
 @router.delete("/pagos/metodo-pago")
-async def borrar_metodo_pago_endpoint() -> JSONResponse:
+async def borrar_metodo_pago_endpoint(user: UserPayload = Depends(get_current_user)) -> JSONResponse:
     """Elimina la tarjeta guardada localmente y de MercadoPago."""
     # Intentar borrar de MP primero (best-effort, no bloquea)
-    metodo = await imagiax_pagos_db.get_metodo_pago()
+    metodo = await imagiax_pagos_db.get_metodo_pago(usuario_id=user.user_id)
     if metodo and metodo.get("mp_customer_id") and metodo.get("mp_card_id"):
         try:
             await _mp_get(
@@ -584,12 +608,12 @@ async def borrar_metodo_pago_endpoint() -> JSONResponse:
         except Exception as exc:
             logger.warning("Error al borrar tarjeta de MP (continuando): %s", exc)
 
-    await imagiax_pagos_db.borrar_metodo_pago()
+    await imagiax_pagos_db.borrar_metodo_pago(usuario_id=user.user_id)
     return JSONResponse({"ok": True, "mensaje": "Método de pago eliminado correctamente."})
 
 
 @router.post("/pagos/cancelar-suscripcion")
-async def cancelar_suscripcion_endpoint() -> JSONResponse:
+async def cancelar_suscripcion_endpoint(user: UserPayload = Depends(get_current_user)) -> JSONResponse:
     """
     Cancela la suscripción activa del usuario.
     
@@ -602,7 +626,7 @@ async def cancelar_suscripcion_endpoint() -> JSONResponse:
     Los créditos restantes siguen disponibles hasta agotarse.
     """
     # Paso 1: Buscar suscripción activa sin modificar estado local
-    suscripcion = await imagiax_pagos_db.get_suscripcion_activa()
+    suscripcion = await imagiax_pagos_db.get_suscripcion_activa(usuario_id=user.user_id)
     if not suscripcion:
         raise HTTPException(400, "No hay suscripción activa para cancelar.")
 
@@ -644,7 +668,7 @@ async def cancelar_suscripcion_endpoint() -> JSONResponse:
 # ── Endpoint: Crear sesión de pago ─────────────────────────────────────────────
 
 @router.post("/pagos/crear-sesion")
-async def crear_sesion_pago(body: CrearSesionRequest) -> JSONResponse:
+async def crear_sesion_pago(body: CrearSesionRequest, user: UserPayload = Depends(get_current_user)) -> JSONResponse:
     """
     Crea una sesión de pago en MercadoPago y retorna la URL de checkout.
     Para packs: Checkout Pro (preference).
@@ -656,7 +680,7 @@ async def crear_sesion_pago(body: CrearSesionRequest) -> JSONResponse:
 
     # Validar que no haya suscripción activa si intenta comprar otra
     if plan["recurrente"]:
-        estado = await imagiax_pagos_db.get_estado_creditos()
+        estado = await imagiax_pagos_db.get_estado_creditos(usuario_id=user.user_id)
         if estado.get("tiene_suscripcion"):
             raise HTTPException(
                 400,
@@ -676,6 +700,7 @@ async def crear_sesion_pago(body: CrearSesionRequest) -> JSONResponse:
         "plan_id": body.plan_id,
         "email": body.email,
         "centro_medico": body.centro_medico,
+        "usuario_id": user.user_id,
     }, ensure_ascii=False)
 
     if plan["recurrente"]:
@@ -799,6 +824,7 @@ async def _crear_preapproval(
 
 @router.get("/pagos/exito", response_class=HTMLResponse)
 async def pago_exitoso(
+    request: Request,
     payment_id: str = Query(None),
     collection_id: str = Query(None),
     collection_status: str = Query(None),
@@ -807,9 +833,25 @@ async def pago_exitoso(
     merchant_order_id: str = Query(None),
 ) -> HTMLResponse:
     """
-    MercadoPago redirige aquí tras un pago aprobado.
-    Verificamos el pago con la API de MP y acreditamos los créditos.
+    MercadoPago redirige aqui tras un pago aprobado.
+    Verificamos el pago con la API de MP y acreditamos los creditos.
+
+    SEC-PAY-002: Soft auth — intenta validar cookie de sesion.
+    Si la cookie expiro durante el checkout, igual procesamos usando usuario_id
+    de external_reference (MP redirect puede llegar con sesion vencida).
     """
+    # Soft auth: intentar obtener usuario desde cookie (SEC-PAY-002)
+    import imagiax_auth as _auth_mod
+    _session_token = request.cookies.get("imagiax_session")
+    if _session_token:
+        try:
+            _soft_user = _auth_mod.decode_token(_session_token)
+        except Exception:
+            logger.warning(
+                "pagos/exito: cookie de sesion expirada durante redirect de MP — "
+                "procesando con usuario_id de external_reference"
+            )
+
     payment_id = payment_id or collection_id
     if not payment_id:
         return HTMLResponse(_page_error("No se recibió un ID de pago válido."))
@@ -831,6 +873,7 @@ async def pago_exitoso(
 
     plan_id = ext_ref.get("plan_id", "pack_individual")
     cliente_id = ext_ref.get("cliente_id")
+    ext_uid = ext_ref.get("usuario_id") or None
     email = ext_ref.get("email", payment_data.get("payer", {}).get("email", ""))
     plan = PLANES.get(plan_id, PLANES["pack_individual"])
 
@@ -845,6 +888,7 @@ async def pago_exitoso(
                 mp_payment_id=str(payment_id),
                 mp_preference_id=preference_id,
                 duracion_dias=plan.get("duracion_dias"),
+                usuario_id=ext_uid,
             )
             await imagiax_pagos_db.registrar_pago(
                 cliente_id=cliente_id,
@@ -861,7 +905,7 @@ async def pago_exitoso(
         except Exception as exc:
             logger.error("Error acreditando pago %s: %s", payment_id, exc)
 
-    estado_actual = await imagiax_pagos_db.get_estado_creditos()
+    estado_actual = await imagiax_pagos_db.get_estado_creditos(usuario_id=ext_uid)
     return HTMLResponse(_page_exito(
         plan=plan,
         creditos_nuevos=plan["creditos"],
@@ -891,6 +935,7 @@ async def suscripcion_exitosa(
 
     plan_id = ext_ref.get("plan_id", "suscripcion_mensual")
     cliente_id = ext_ref.get("cliente_id")
+    ext_uid = ext_ref.get("usuario_id") or None
     email = ext_ref.get("email", preapproval_data.get("payer_email", ""))
     plan = PLANES.get(plan_id, PLANES["suscripcion_mensual"])
 
@@ -902,6 +947,7 @@ async def suscripcion_exitosa(
                 creditos=plan["creditos"],
                 mp_preapproval_id=preapproval_id,
                 duracion_dias=plan.get("duracion_dias", 31),
+                usuario_id=ext_uid,
             )
             await imagiax_pagos_db.registrar_pago(
                 cliente_id=cliente_id,
@@ -918,7 +964,7 @@ async def suscripcion_exitosa(
         except Exception as exc:
             logger.error("Error acreditando suscripción %s: %s", preapproval_id, exc)
 
-    estado_actual = await imagiax_pagos_db.get_estado_creditos()
+    estado_actual = await imagiax_pagos_db.get_estado_creditos(usuario_id=ext_uid)
     return HTMLResponse(_page_exito(
         plan=plan,
         creditos_nuevos=plan["creditos"],
@@ -1002,6 +1048,7 @@ async def _procesar_webhook_payment(payment_id: str, raw: dict) -> None:
 
     plan_id = ext_ref.get("plan_id", "pack_individual")
     cliente_id = ext_ref.get("cliente_id")
+    ext_uid = ext_ref.get("usuario_id") or None
     if not cliente_id:
         logger.warning("Webhook pago %s sin cliente_id en external_reference.", payment_id)
         return
@@ -1013,6 +1060,7 @@ async def _procesar_webhook_payment(payment_id: str, raw: dict) -> None:
         creditos=plan["creditos"],
         mp_payment_id=payment_id,
         duracion_dias=plan.get("duracion_dias"),
+        usuario_id=ext_uid,
     )
     await imagiax_pagos_db.registrar_pago(
         cliente_id=cliente_id,
@@ -1040,6 +1088,7 @@ async def _procesar_webhook_preapproval(preapproval_id: str, raw: dict) -> None:
 
     plan_id = ext_ref.get("plan_id", "suscripcion_mensual")
     cliente_id = ext_ref.get("cliente_id")
+    ext_uid = ext_ref.get("usuario_id") or None
     if not cliente_id:
         return
 
@@ -1050,6 +1099,7 @@ async def _procesar_webhook_preapproval(preapproval_id: str, raw: dict) -> None:
         creditos=plan["creditos"],
         mp_preapproval_id=preapproval_id,
         duracion_dias=plan.get("duracion_dias", 31),
+        usuario_id=ext_uid,
     )
     await imagiax_pagos_db.registrar_pago(
         cliente_id=cliente_id,
@@ -1091,7 +1141,7 @@ async def _procesar_webhook_renovacion(payment_id: str, raw: dict) -> None:
 # ── Admin ──────────────────────────────────────────────────────────────────────
 
 @router.get("/pagos/admin/resumen")
-async def admin_resumen() -> JSONResponse:
+async def admin_resumen(user: UserPayload = Depends(require_role("admin"))) -> JSONResponse:
     """
     Resumen administrativo: clientes, licencias, pagos e ingresos.
     Sin autenticación en modo testing — proteger con middleware en producción.
@@ -1103,7 +1153,7 @@ async def admin_resumen() -> JSONResponse:
 # ── Verificación manual de pago (para testing local) ─────────────────────────
 
 @router.get("/pagos/verificar/{payment_id}")
-async def verificar_pago_manual(payment_id: str) -> JSONResponse:
+async def verificar_pago_manual(payment_id: str, user: UserPayload = Depends(require_role("admin"))) -> JSONResponse:
     """
     Verifica un pago con MercadoPago y acredita créditos si está aprobado.
     Útil para testing local donde los webhooks no llegan.
@@ -1126,6 +1176,7 @@ async def verificar_pago_manual(payment_id: str) -> JSONResponse:
     ext_ref = _parse_external_reference(payment_data.get("external_reference", ""))
     plan_id = ext_ref.get("plan_id", "pack_individual")
     cliente_id = ext_ref.get("cliente_id")
+    ext_uid = ext_ref.get("usuario_id") or None
     plan = PLANES.get(plan_id, PLANES["pack_individual"])
 
     if not cliente_id:
@@ -1137,7 +1188,7 @@ async def verificar_pago_manual(payment_id: str) -> JSONResponse:
     # Verificar si ya fue procesado
     pago_existente = await imagiax_pagos_db.buscar_pago_por_mp_id(str(payment_id))
     if pago_existente and pago_existente.get("estado") == "approved":
-        estado_actual = await imagiax_pagos_db.get_estado_creditos()
+        estado_actual = await imagiax_pagos_db.get_estado_creditos(usuario_id=ext_uid)
         return JSONResponse({
             "ok": True,
             "mensaje": "Este pago ya fue procesado anteriormente.",
@@ -1153,6 +1204,7 @@ async def verificar_pago_manual(payment_id: str) -> JSONResponse:
             mp_payment_id=str(payment_id),
             mp_preference_id=payment_data.get("preference_id"),
             duracion_dias=plan.get("duracion_dias"),
+            usuario_id=ext_uid,
         )
         await imagiax_pagos_db.registrar_pago(
             cliente_id=cliente_id,
@@ -1170,7 +1222,7 @@ async def verificar_pago_manual(payment_id: str) -> JSONResponse:
         logger.error("Error acreditando pago manual %s: %s", payment_id, exc)
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
-    estado_actual = await imagiax_pagos_db.get_estado_creditos()
+    estado_actual = await imagiax_pagos_db.get_estado_creditos(usuario_id=ext_uid)
     return JSONResponse({
         "ok": True,
         "mensaje": f"Pago verificado y acreditado correctamente.",
@@ -1183,7 +1235,7 @@ async def verificar_pago_manual(payment_id: str) -> JSONResponse:
 # ── Historial de cobros (API JSON) ────────────────────────────────────────────
 
 @router.get("/pagos/historial-cobros")
-async def historial_cobros(periodo: str = Query("total")) -> JSONResponse:
+async def historial_cobros(periodo: str = Query("total"), user: UserPayload = Depends(require_role("admin"))) -> JSONResponse:
     """
     Retorna historial de cobros filtrado por periodo.
     Valores: dia, semana, mes, trimestre, anio, total
@@ -1193,7 +1245,7 @@ async def historial_cobros(periodo: str = Query("total")) -> JSONResponse:
 
 
 @router.get("/pagos/exportar-excel")
-async def exportar_excel(periodo: str = Query("total")):
+async def exportar_excel(periodo: str = Query("total"), user: UserPayload = Depends(require_role("admin"))):
     """Genera reporte Excel profesional con KPIs, tabla detallada y graficos."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
@@ -1445,135 +1497,184 @@ _HISTORIAL_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <title>Historial de cobros &mdash; IMAGIAX</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-       background:#060b18;color:#e2e8f0;min-height:100vh}
+  :root{--bg:#060b18;--surface:#0c1222;--surface2:#111827;--border:#1e293b;
+        --text:#f1f5f9;--muted:#64748b;--blue:#3b82f6;--green:#22c55e}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+       background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
 
-  .page{max-width:1040px;margin:0 auto;padding:40px 28px 60px}
+  /* Ambient glow */
+  body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;
+    background:radial-gradient(ellipse 900px 500px at 50% -80px,rgba(59,130,246,.07),transparent);
+    pointer-events:none;z-index:0}
 
-  /* Header */
-  .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px}
-  .header-left{display:flex;align-items:center;gap:14px}
-  .logo-mark{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);
-             display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff;
-             letter-spacing:-0.5px;flex-shrink:0}
-  .header h1{font-size:20px;font-weight:600;color:#f8fafc;letter-spacing:-0.3px}
-  .header-actions{display:flex;gap:10px;align-items:center}
-  .btn-back{color:#94a3b8;text-decoration:none;font-size:13px;padding:7px 14px;border-radius:7px;
-            border:1px solid #1e293b;background:#0f172a;transition:all .2s}
-  .btn-back:hover{border-color:#334155;color:#e2e8f0;background:#1e293b}
+  /* Sticky header */
+  .topbar{position:sticky;top:0;z-index:100;
+    background:rgba(6,11,24,.85);backdrop-filter:blur(16px) saturate(1.4);
+    -webkit-backdrop-filter:blur(16px) saturate(1.4);
+    border-bottom:1px solid rgba(30,41,59,.6);
+    padding:0 28px;height:60px;display:flex;align-items:center;gap:14px}
+  .topbar-logo{width:34px;height:34px;border-radius:9px;
+    background:linear-gradient(135deg,#1e40af,#6d28d9);
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:13px;color:#fff;letter-spacing:-.5px;
+    box-shadow:0 0 20px rgba(59,130,246,.3);flex-shrink:0}
+  .topbar-name{font-size:16px;font-weight:700;letter-spacing:-.3px}
+  .topbar-sub{font-size:10px;color:var(--muted);letter-spacing:.2px;margin-top:1px}
+  .topbar-actions{margin-left:auto;display:flex;gap:8px;align-items:center}
+  .btn-sm{color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;
+    padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:transparent;
+    cursor:pointer;transition:all .2s;font-family:inherit}
+  .btn-sm:hover{border-color:#334155;color:var(--text);background:var(--surface)}
+
+  .page{max-width:1040px;margin:0 auto;padding:36px 28px 60px;position:relative;z-index:1}
+
+  /* Page title */
+  .page-title{margin-bottom:28px}
+  .page-title h1{font-size:26px;font-weight:800;letter-spacing:-.5px;
+    background:linear-gradient(135deg,#f1f5f9,#94a3b8);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .page-title p{color:var(--muted);font-size:13px;margin-top:4px}
 
   /* KPI cards */
-  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:28px}
+  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
   @media(max-width:700px){.kpi-row{grid-template-columns:repeat(2,1fr)}}
-  .kpi{background:linear-gradient(135deg,#0f172a 0%,#131c33 100%);
-       border:1px solid #1e293b;border-radius:12px;padding:20px 18px;position:relative;overflow:hidden}
-  .kpi::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;
-              background:linear-gradient(90deg,transparent,#334155,transparent);opacity:.5}
-  .kpi .kpi-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.8px;
-                   font-weight:600;margin-bottom:8px}
-  .kpi .kpi-value{font-size:26px;font-weight:700;color:#f1f5f9;font-variant-numeric:tabular-nums;
-                   letter-spacing:-0.5px}
-  .kpi .kpi-value.accent{color:#34d399}
-  .kpi .kpi-value.warn{color:#fb923c}
+  .kpi{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+       padding:20px 20px 18px;position:relative;overflow:hidden;transition:border-color .2s}
+  .kpi:hover{border-color:#334155}
+  .kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,transparent,var(--kpi-accent,#334155),transparent)}
+  .kpi-1{--kpi-accent:#22c55e}.kpi-2{--kpi-accent:#3b82f6}
+  .kpi-3{--kpi-accent:#4ade80}.kpi-4{--kpi-accent:#fb923c}
+  .kpi-label{font-size:10.5px;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.8px;font-weight:600;margin-bottom:10px}
+  .kpi-value{font-size:28px;font-weight:800;color:var(--text);
+    font-variant-numeric:tabular-nums;letter-spacing:-.8px}
+  .kpi-value.accent{color:#34d399}
+  .kpi-value.warn{color:#fb923c}
 
   /* Period filters */
-  .filters{display:flex;gap:6px;margin-bottom:22px;flex-wrap:wrap}
-  .f-btn{background:transparent;border:1px solid #1e293b;color:#64748b;padding:6px 14px;
-         border-radius:20px;cursor:pointer;font-size:12px;font-weight:500;transition:all .2s;
-         letter-spacing:.2px}
-  .f-btn:hover{border-color:#475569;color:#cbd5e1}
-  .f-btn.active{background:#1e293b;border-color:#3b82f6;color:#93c5fd;font-weight:600}
+  .filters-row{display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:20px;gap:12px;flex-wrap:wrap}
+  .filters{display:flex;gap:4px;flex-wrap:wrap;padding:3px;
+    background:var(--surface);border:1px solid var(--border);border-radius:10px;width:fit-content}
+  .f-btn{background:transparent;border:none;color:var(--muted);padding:6px 14px;
+    border-radius:7px;cursor:pointer;font-size:12px;font-weight:500;transition:all .2s;
+    letter-spacing:.1px;font-family:inherit}
+  .f-btn:hover{color:var(--text);background:rgba(255,255,255,.04)}
+  .f-btn.active{background:var(--blue);color:#fff;font-weight:600;
+    box-shadow:0 2px 8px rgba(59,130,246,.25)}
 
   /* Table */
-  .table-wrap{background:#0c1222;border:1px solid #1e293b;border-radius:12px;overflow:hidden}
+  .table-wrap{background:var(--surface);border:1px solid var(--border);
+    border-radius:14px;overflow:hidden}
+  .table-header{padding:18px 20px;border-bottom:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-between}
+  .table-title{font-size:14px;font-weight:700}
+  .table-count{font-size:12px;color:var(--muted)}
   table{width:100%;border-collapse:collapse}
-  thead th{background:#080e1c;text-align:left;padding:13px 16px;font-size:11px;
-           color:#64748b;text-transform:uppercase;letter-spacing:.7px;font-weight:600;
-           border-bottom:1px solid #1e293b}
-  tbody td{padding:14px 16px;border-bottom:1px solid rgba(30,41,59,.5);font-size:13.5px;
-           vertical-align:middle}
+  thead th{background:#080e1c;text-align:left;padding:12px 16px;font-size:10.5px;
+    color:var(--muted);text-transform:uppercase;letter-spacing:.7px;font-weight:600;
+    border-bottom:1px solid var(--border)}
+  tbody td{padding:14px 16px;border-bottom:1px solid rgba(30,41,59,.5);font-size:13px;
+    vertical-align:middle}
   tbody tr{transition:background .15s}
-  tbody tr:hover{background:rgba(30,41,59,.4)}
+  tbody tr:hover td{background:rgba(30,41,59,.35)}
   tbody tr:last-child td{border-bottom:none}
 
-  .cell-fecha{color:#94a3b8;font-size:13px;white-space:nowrap}
-  .cell-desc{color:#cbd5e1;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .cell-tipo{color:#94a3b8;font-size:12.5px}
-  .cell-monto{font-weight:600;color:#f1f5f9;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+  .cell-fecha{color:#94a3b8;font-size:12.5px;white-space:nowrap;font-family:monospace}
+  .cell-desc{color:#cbd5e1;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+  .cell-tipo{color:#94a3b8;font-size:12px}
+  .cell-monto{font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+  .cell-via{font-size:10px;color:var(--muted);text-align:center;font-weight:600;letter-spacing:.4px}
 
   .badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;
-         font-size:11.5px;font-weight:600;letter-spacing:.2px}
-  .badge-approved{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.2)}
+    font-size:11px;font-weight:600;letter-spacing:.2px}
+  .badge-approved{background:rgba(34,197,94,.1);color:#4ade80;border:1px solid rgba(34,197,94,.18)}
   .badge-rejected{background:rgba(239,68,68,.1);color:#f87171;border:1px solid rgba(239,68,68,.15)}
-  .badge-pending{background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.15)}
-  .badge-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-  .dot-approved{background:#4ade80}
-  .dot-rejected{background:#f87171}
-  .dot-pending{background:#fbbf24}
+  .badge-pending{background:rgba(251,191,36,.08);color:#fbbf24;border:1px solid rgba(251,191,36,.15)}
+  .badge-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+  .dot-approved{background:#4ade80}.dot-rejected{background:#f87171}.dot-pending{background:#fbbf24}
 
-  .empty-state{text-align:center;padding:56px 20px;color:#475569}
-  .empty-state p{font-size:14px;margin-top:6px}
+  .empty-state{text-align:center;padding:56px 20px}
+  .empty-state svg{opacity:.3;margin-bottom:12px}
+  .empty-state-title{font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px}
+  .empty-state p{font-size:13px;color:var(--muted)}
 
-  /* Footer */
   .page-footer{margin-top:32px;text-align:center;color:#334155;font-size:11px;letter-spacing:.3px}
 
-  /* Responsive */
   @media(max-width:640px){
+    .topbar{padding:0 16px}
     .page{padding:20px 14px 40px}
-    .header{flex-direction:column;gap:12px;align-items:flex-start}
-    .kpi .kpi-value{font-size:20px}
-    tbody td{padding:10px 10px;font-size:12.5px}
-    .cell-desc{max-width:160px}
+    .page-title h1{font-size:20px}
+    .kpi-value{font-size:22px}
+    tbody td{padding:10px 10px;font-size:12px}
+    .cell-desc{max-width:140px}
+    .filters{overflow-x:auto}
   }
 </style>
 </head>
 <body>
 {test_badge}
+<!-- Sticky top bar -->
+<header class="topbar">
+  <div class="topbar-logo">IX</div>
+  <div>
+    <div class="topbar-name">IMAGIAX</div>
+    <div class="topbar-sub">Medical AI Platform</div>
+  </div>
+  <div class="topbar-actions">
+    <button class="btn-sm" onclick="exportExcel()" title="Exportar Excel">&#8615; Excel</button>
+    <button class="btn-sm" onclick="exportCSV()" title="Exportar CSV">&#8615; CSV</button>
+    <a class="btn-sm" href="__PAGAR_URL__">&larr; Planes</a>
+  </div>
+</header>
+
 <div class="page">
-  <div class="header">
-    <div class="header-left">
-      <div class="logo-mark">IX</div>
-      <h1>Historial de cobros</h1>
-    </div>
-    <div class="header-actions">
-      <button class="btn-back" onclick="exportExcel()" title="Descargar reporte Excel con gr&aacute;ficos">&#8615; Excel</button>
-      <button class="btn-back" onclick="exportCSV()" title="Descargar CSV">&#8615; CSV</button>
-      <a class="btn-back" href="__PAGAR_URL__">&larr; Planes</a>
-    </div>
+  <div class="page-title">
+    <h1>Historial de cobros</h1>
+    <p>Registro completo de transacciones y pagos procesados</p>
   </div>
 
   <div class="kpi-row">
-    <div class="kpi">
+    <div class="kpi kpi-1">
       <div class="kpi-label">Total facturado</div>
       <div class="kpi-value accent" id="kpi-gastado">$0</div>
     </div>
-    <div class="kpi">
+    <div class="kpi kpi-2">
       <div class="kpi-label">Transacciones</div>
       <div class="kpi-value" id="kpi-total">0</div>
     </div>
-    <div class="kpi">
+    <div class="kpi kpi-3">
       <div class="kpi-label">Aprobadas</div>
       <div class="kpi-value" id="kpi-ok">0</div>
     </div>
-    <div class="kpi">
+    <div class="kpi kpi-4">
       <div class="kpi-label">Rechazadas</div>
       <div class="kpi-value warn" id="kpi-fail">0</div>
     </div>
   </div>
 
-  <div class="filters">
-    <button class="f-btn" data-p="dia">Hoy</button>
-    <button class="f-btn" data-p="semana">7 d&iacute;as</button>
-    <button class="f-btn" data-p="mes">30 d&iacute;as</button>
-    <button class="f-btn" data-p="trimestre">90 d&iacute;as</button>
-    <button class="f-btn" data-p="anio">12 meses</button>
-    <button class="f-btn active" data-p="total">Todo</button>
+  <div class="filters-row">
+    <div class="filters">
+      <button class="f-btn" data-p="dia">Hoy</button>
+      <button class="f-btn" data-p="semana">7 d&iacute;as</button>
+      <button class="f-btn" data-p="mes">30 d&iacute;as</button>
+      <button class="f-btn" data-p="trimestre">90 d&iacute;as</button>
+      <button class="f-btn" data-p="anio">12 meses</button>
+      <button class="f-btn active" data-p="total">Todo</button>
+    </div>
   </div>
 
   <div class="table-wrap">
+    <div class="table-header">
+      <span class="table-title">Transacciones</span>
+      <span class="table-count" id="table-count">&mdash;</span>
+    </div>
     <table>
       <thead>
         <tr>
@@ -1608,14 +1709,16 @@ function renderPage(){
   const tb=document.getElementById('tb');
   const start=(_page-1)*PAGE_SIZE, end=_page*PAGE_SIZE;
   const slice=_allCobros.slice(start,end);
-  if(!slice.length){tb.innerHTML='<tr><td colspan="6" class="empty-state"><p>Sin transacciones en este per\u00edodo</p></td></tr>';return}
+  const cnt=document.getElementById('table-count');
+  if(cnt)cnt.textContent=_allCobros.length?_allCobros.length+' registros':'';
+  if(!slice.length){tb.innerHTML='<tr><td colspan="6"><div class="empty-state"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg><div class="empty-state-title">Sin transacciones</div><p>No hay registros en este per\u00edodo</p></div></td></tr>';return}
   tb.innerHTML=slice.map(c=>'<tr>'
     +'<td class="cell-fecha">'+fdate(c.created_at)+'</td>'
     +'<td class="cell-desc" title="'+(c.descripcion||'')+'">'+(c.descripcion||'&mdash;')+'</td>'
     +'<td class="cell-tipo">'+(tipos[c.tipo]||c.tipo)+'</td>'
     +'<td><span class="badge badge-'+c.estado+'"><span class="badge-dot dot-'+c.estado+'"></span>'+(estados[c.estado]||c.estado)+'</span></td>'
     +'<td class="cell-monto">'+fmt(c.monto_clp)+'</td>'
-    +'<td style="font-size:10px;color:#64748b;text-align:center">'+(origenes[c.origen]||c.origen||'MP')+'</td>'
+    +'<td class="cell-via">'+(origenes[c.origen]||c.origen||'MP')+'</td>'
     +'</tr>').join('');
   const pages=Math.ceil(_allCobros.length/PAGE_SIZE);
   let pg=document.getElementById('pager');
@@ -1720,7 +1823,7 @@ async def pagina_pago(
         ct = (oneclick_inscripcion.get("card_type") or "TARJETA").upper()
         cl4 = oneclick_inscripcion.get("card_number_last4") or "****"
         metodo_pago_html = f"""
-        <div class="estado-item">
+        <div class="estado-item accent-blue">
           <div class="estado-item-label">Pago automatico</div>
           <div class="estado-item-value azul">{ct} ****{cl4}</div>
           <div class="estado-item-detail">Transbank Oneclick</div>
@@ -1729,7 +1832,7 @@ async def pagina_pago(
         brand = (metodo_actual.get("card_brand") or "TARJETA").upper()
         last4 = metodo_actual.get("card_last4") or "****"
         metodo_pago_html = f"""
-        <div class="estado-item">
+        <div class="estado-item accent-blue">
           <div class="estado-item-label">Pago automatico</div>
           <div class="estado-item-value azul">{brand} ****{last4}</div>
           <div class="estado-item-detail">MercadoPago</div>
@@ -1746,7 +1849,7 @@ async def pagina_pago(
     suscripcion_html = ""
     if tiene_suscripcion:
         suscripcion_html = """
-        <div class="estado-item">
+        <div class="estado-item accent-green">
           <div class="estado-item-label">Suscripcion</div>
           <div class="estado-item-value verde">Activa</div>
           <div class="estado-item-detail">300 creditos/mes</div>
@@ -1879,16 +1982,29 @@ def _plan_card_html(plan_id: str, plan: dict, tiene_suscripcion: bool = False) -
         badge = f'<div class="{badge_cls}">{badge_text}</div>'
     else:
         badge = ""
+
     precio_fmt = f"${plan['precio_clp']:,}".replace(",", ".")
     frecuencia = "/mes" if plan["recurrente"] else ""
-    if plan["recurrente"]:
-        creditos_txt = f"{plan['creditos']}/mes"
-    else:
-        creditos_txt = str(plan["creditos"])
+    creditos_txt = f"{plan['creditos']}/mes" if plan["recurrente"] else str(plan["creditos"])
+
+    # Precio unitario por informe
+    precio_unit = round(plan['precio_clp'] / plan['creditos'])
+    precio_unit_fmt = f"${precio_unit:,}".replace(",", ".")
+    unit_label = f'<div class="plan-unit-price">{precio_unit_fmt} CLP por informe</div>'
+
     destacado = plan.get("badge") == "Más popular"
     card_class = "plan-card destacado" if destacado else "plan-card"
 
-    # Deshabilitar botón de suscripción si ya tiene una activa
+    # Icono SVG por tipo de plan
+    icons = {
+        "pack_individual": '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>',
+        "pack_50":         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+        "pack_200":        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
+        "suscripcion_mensual": '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+    }
+    icon_html = icons.get(plan_id, "")
+    icon_color = "#3b82f6" if not destacado else "#60a5fa"
+
     btn_disabled = ""
     btn_text = 'Suscribirse' if plan['recurrente'] else 'Comprar ahora'
     if plan["recurrente"] and tiene_suscripcion:
@@ -1898,11 +2014,13 @@ def _plan_card_html(plan_id: str, plan: dict, tiene_suscripcion: bool = False) -
     return f"""
     <div class="{card_class}" data-plan="{plan_id}">
       {badge}
+      <div class="plan-icon" style="color:{icon_color}">{icon_html}</div>
       <div class="plan-titulo">{plan['titulo']}</div>
       <div class="plan-precio">
         <span class="precio-monto">{precio_fmt}</span>
         <span class="precio-clp">CLP{frecuencia}</span>
       </div>
+      {unit_label}
       <div class="plan-desc">{plan['descripcion']}</div>
       <div class="plan-creditos">
         <span class="credito-num">{creditos_txt}</span>
@@ -1923,70 +2041,129 @@ def _page_exito(
     email: str = "",
     es_suscripcion: bool = False,
 ) -> str:
-    tipo_txt = "suscripción activada" if es_suscripcion else "pago aprobado"
-    renovacion_txt = (
-        "<p style='color:#94a3b8;font-size:13px;margin-top:8px;'>"
-        "Tu suscripción se renueva automáticamente cada 30 días.</p>"
+    titulo_txt = "¡Suscripción activada!" if es_suscripcion else "¡Pago aprobado!"
+    renovacion = (
+        '<div class="renewal-note">🔄 Tu suscripción se renueva automáticamente cada 30 días.</div>'
     ) if es_suscripcion else ""
-    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+    email_line = f'<p class="email-confirm">Confirmación enviada a <strong>{email}</strong></p>' if email else ""
+    return f"""<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>IMAGIAX — ¡Pago aprobado!</title>
-<style>{_CSS_BASE}</style></head><body>
+<style>
+{_CSS_BASE}
+body {{ --glow-color: rgba(34,197,94,.08); }}
+</style></head><body>
 <div class="page-center">
-  <div class="result-card">
-    <div class="result-icon success"></div>
-    <h1 class="result-title">¡{tipo_txt.capitalize()}!</h1>
-    <p class="result-subtitle">{plan['titulo']}</p>
-    <div class="creditos-box">
-      <div class="creditos-num">+{creditos_nuevos}</div>
-      <div class="creditos-lbl">créditos acreditados</div>
-      <div class="creditos-total">Total disponible: <strong>{creditos_totales}</strong> informes</div>
-    </div>
-    {renovacion_txt}
-    {'<p style="color:#64748b;font-size:12px;margin-top:8px;">Confirmación enviada a: '+email+'</p>' if email else ''}
-    <div class="result-actions">
-      <a href="{_VIEWER_URL}" class="btn-primary">Volver al visor</a>
-      <a href="{IMAGIAX_BASE_URL}/pagar" class="btn-secondary">Ver mis planes</a>
+  <div style="width:100%;max-width:460px">
+    <nav class="result-nav">
+      <div class="result-nav-logo">IX</div>
+      <div>
+        <div class="result-nav-name">IMAGIAX</div>
+        <div class="result-nav-tag">Medical AI Platform</div>
+      </div>
+    </nav>
+    <div class="result-card" style="--accent-line: #22c55e">
+      <div class="result-icon success">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </div>
+      <h1 class="result-title">{titulo_txt}</h1>
+      <p class="result-subtitle">{plan['titulo']}</p>
+      <div class="creditos-box">
+        <div class="creditos-num">+{creditos_nuevos}</div>
+        <div class="creditos-lbl">créditos acreditados</div>
+        <div class="creditos-total">Total disponible: <strong>{creditos_totales}</strong> informes</div>
+      </div>
+      {renovacion}
+      {email_line}
+      <div class="result-actions">
+        <a href="{_VIEWER_URL}" class="btn-primary">Volver al visor</a>
+        <a href="{IMAGIAX_BASE_URL}/pagar" class="btn-secondary">Ver mis planes</a>
+      </div>
     </div>
   </div>
 </div></body></html>"""
 
 
 def _page_pendiente(payment_id: str) -> str:
-    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+    id_badge = f'<div class="payment-id">ID: {payment_id}</div>' if payment_id else ""
+    return f"""<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>IMAGIAX — Pago en proceso</title>
-<style>{_CSS_BASE}</style></head><body>
+<style>
+{_CSS_BASE}
+body {{ --glow-color: rgba(245,158,11,.07); }}
+@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+.icon-spin {{ animation: spin 2s linear infinite; transform-origin: center; }}
+</style></head><body>
 <div class="page-center">
-  <div class="result-card">
-    <div class="result-icon pending">⏳</div>
-    <h1 class="result-title">Pago en proceso</h1>
-    <p class="result-subtitle">Tu pago está siendo procesado.</p>
-    <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin-top:12px;">
-      MercadoPago está verificando la transacción. Esto puede tomar algunos minutos.<br>
-      Una vez confirmado, tus créditos se acreditarán automáticamente.
-    </p>
-    {'<p style="color:#475569;font-size:11px;margin-top:8px;">ID: ' + payment_id + '</p>' if payment_id else ''}
-    <div class="result-actions">
-      <a href="{_VIEWER_URL}" class="btn-primary">Volver al visor</a>
-      <a href="{IMAGIAX_BASE_URL}/pagar" class="btn-secondary">Ver mis planes</a>
+  <div style="width:100%;max-width:460px">
+    <nav class="result-nav">
+      <div class="result-nav-logo">IX</div>
+      <div>
+        <div class="result-nav-name">IMAGIAX</div>
+        <div class="result-nav-tag">Medical AI Platform</div>
+      </div>
+    </nav>
+    <div class="result-card" style="--accent-line: #f59e0b">
+      <div class="result-icon pending">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="10" class="icon-spin" stroke-dasharray="50 14"/>
+          <polyline points="12 6 12 12 16 14" stroke-width="2.5"/>
+        </svg>
+      </div>
+      <h1 class="result-title">Pago en proceso</h1>
+      <p class="result-subtitle">Tu transacción está siendo verificada</p>
+      <p class="result-body">
+        MercadoPago está procesando el pago. Esto puede tomar algunos minutos.
+        Una vez confirmado, tus créditos se acreditarán automáticamente y recibirás una notificación.
+      </p>
+      {id_badge}
+      <hr class="result-divider">
+      <div class="result-actions">
+        <a href="{_VIEWER_URL}" class="btn-primary">Volver al visor</a>
+        <a href="{IMAGIAX_BASE_URL}/pagar" class="btn-secondary">Ver mis planes</a>
+      </div>
     </div>
   </div>
 </div></body></html>"""
 
 
 def _page_error(mensaje: str) -> str:
-    return f"""<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+    return f"""<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>IMAGIAX — Error de pago</title>
-<style>{_CSS_BASE}</style></head><body>
+<style>
+{_CSS_BASE}
+body {{ --glow-color: rgba(239,68,68,.07); }}
+</style></head><body>
 <div class="page-center">
-  <div class="result-card">
-    <div class="result-icon error">✗</div>
-    <h1 class="result-title">Error en el pago</h1>
-    <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin-top:12px;">{mensaje}</p>
-    <div class="result-actions">
-      <a href="{IMAGIAX_BASE_URL}/pagar" class="btn-primary">Reintentar</a>
+  <div style="width:100%;max-width:460px">
+    <nav class="result-nav">
+      <div class="result-nav-logo">IX</div>
+      <div>
+        <div class="result-nav-name">IMAGIAX</div>
+        <div class="result-nav-tag">Medical AI Platform</div>
+      </div>
+    </nav>
+    <div class="result-card" style="--accent-line: #ef4444">
+      <div class="result-icon error">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </div>
+      <h1 class="result-title">Error en el pago</h1>
+      <p class="result-body">{mensaje}</p>
+      <hr class="result-divider">
+      <div class="result-actions">
+        <a href="{IMAGIAX_BASE_URL}/pagar" class="btn-primary">Reintentar</a>
+        <a href="{_VIEWER_URL}" class="btn-secondary">Volver al visor</a>
+      </div>
     </div>
   </div>
 </div></body></html>"""
@@ -1995,23 +2172,129 @@ def _page_error(mensaje: str) -> str:
 # ── CSS compartido ─────────────────────────────────────────────────────────────
 
 _CSS_BASE = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0d1420; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; }
-.page-center { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
-.result-card { background: #111827; border: 1px solid #1e3a5f; border-radius: 16px; padding: 40px; max-width: 440px; width: 100%; text-align: center; }
-.result-icon { font-size: 48px; width: 80px; height: 80px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 36px; }
-.result-icon.success { background: #052e16; color: #22c55e; border: 2px solid #16a34a; }
-.result-icon.pending { background: #1c1917; color: #f59e0b; border: 2px solid #d97706; }
-.result-icon.error { background: #450a0a; color: #f87171; border: 2px solid #dc2626; }
-.result-title { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
-.result-subtitle { color: #64748b; font-size: 14px; }
-.creditos-box { background: #0d1420; border: 1px solid #1e3a5f; border-radius: 12px; padding: 20px; margin: 20px 0; }
-.creditos-num { font-size: 48px; font-weight: 800; color: #22c55e; line-height: 1; }
-.creditos-lbl { color: #64748b; font-size: 13px; margin-top: 4px; }
-.creditos-total { color: #94a3b8; font-size: 12px; margin-top: 8px; }
-.result-actions { display: flex; gap: 10px; justify-content: center; margin-top: 24px; flex-wrap: wrap; }
-.btn-primary { background: linear-gradient(135deg, #1e40af, #3b82f6); color: white; border: none; border-radius: 8px; padding: 10px 24px; font-size: 13px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-block; }
-.btn-secondary { background: transparent; color: #93c5fd; border: 1px solid #1e3a5f; border-radius: 8px; padding: 10px 24px; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-block; }
+:root {
+  --bg: #060b18; --surface: #0c1222; --surface2: #111827;
+  --border: #1e293b; --text: #f1f5f9; --muted: #64748b; --muted2: #475569;
+  --blue: #3b82f6; --blue-dark: #1e40af;
+  --green: #22c55e; --green-dark: #16a34a; --green-bg: #052e16;
+  --amber: #f59e0b; --amber-dark: #d97706; --amber-bg: #1c1100;
+  --red: #f87171; --red-dark: #dc2626; --red-bg: #450a0a;
+  --accent: var(--blue);
+}
+body {
+  background: var(--bg); color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  min-height: 100vh; overflow-x: hidden;
+}
+body::before {
+  content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: radial-gradient(ellipse 700px 500px at 50% -60px, var(--glow-color, rgba(59,130,246,.07)), transparent);
+  pointer-events: none; z-index: 0;
+}
+.page-center {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; padding: 24px; position: relative; z-index: 1;
+}
+/* ── Brand header ── */
+.result-nav {
+  display: flex; align-items: center; gap: 10px;
+  padding: 20px 0 28px; justify-content: center;
+}
+.result-nav-logo {
+  width: 32px; height: 32px; border-radius: 9px;
+  background: linear-gradient(135deg, var(--blue-dark), #6d28d9);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 800; color: #fff; letter-spacing: -.5px;
+  box-shadow: 0 0 20px rgba(59,130,246,.3);
+}
+.result-nav-name { font-size: 14px; font-weight: 700; color: var(--text); letter-spacing: -.2px; }
+.result-nav-tag { font-size: 10px; color: var(--muted); letter-spacing: .2px; }
+
+/* ── Card ── */
+.result-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 20px; padding: 44px 40px 40px; max-width: 460px; width: 100%;
+  text-align: center; position: relative; overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0,0,0,.4);
+}
+.result-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent-line, var(--blue)), transparent);
+}
+/* ── Icon ── */
+.result-icon {
+  width: 76px; height: 76px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 24px; position: relative;
+}
+.result-icon svg { position: relative; z-index: 1; }
+.result-icon::after {
+  content: ''; position: absolute; inset: -6px; border-radius: 50%;
+  border: 1px solid var(--icon-ring, rgba(59,130,246,.2));
+  animation: ring-pulse 2.4s ease-in-out infinite;
+}
+@keyframes ring-pulse { 0%,100%{opacity:.4;transform:scale(1)} 50%{opacity:.1;transform:scale(1.12)} }
+.result-icon.success { background: var(--green-bg); border: 2px solid var(--green-dark); --icon-ring: rgba(34,197,94,.25); }
+.result-icon.pending { background: var(--amber-bg); border: 2px solid var(--amber-dark); --icon-ring: rgba(245,158,11,.25); }
+.result-icon.error   { background: var(--red-bg);   border: 2px solid var(--red-dark);   --icon-ring: rgba(239,68,68,.25); }
+
+/* ── Typography ── */
+.result-title { font-size: 23px; font-weight: 800; letter-spacing: -.4px; margin-bottom: 6px; }
+.result-subtitle { color: var(--muted); font-size: 14px; line-height: 1.5; }
+.result-body { color: #94a3b8; font-size: 13px; line-height: 1.65; margin-top: 14px; }
+
+/* ── Credits box ── */
+.creditos-box {
+  background: rgba(6,11,24,.7); border: 1px solid rgba(34,197,94,.2);
+  border-radius: 14px; padding: 22px 20px; margin: 22px 0;
+  position: relative; overflow: hidden;
+}
+.creditos-box::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(34,197,94,.4), transparent);
+}
+.creditos-num { font-size: 52px; font-weight: 800; color: var(--green); line-height: 1; letter-spacing: -2px; }
+.creditos-lbl { color: #4ade80; font-size: 12px; font-weight: 600; margin-top: 6px; text-transform: uppercase; letter-spacing: .5px; }
+.creditos-total { color: var(--muted); font-size: 12px; margin-top: 10px; }
+.creditos-total strong { color: #86efac; }
+
+/* ── Payment ID badge ── */
+.payment-id {
+  display: inline-block; background: rgba(255,255,255,.04); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px; font-size: 11px; color: var(--muted);
+  font-family: monospace; margin-top: 10px; letter-spacing: .3px;
+}
+
+/* ── Actions ── */
+.result-actions { display: flex; gap: 10px; justify-content: center; margin-top: 28px; flex-wrap: wrap; }
+.btn-primary {
+  background: linear-gradient(135deg, var(--blue-dark), var(--blue)); color: white;
+  border: none; border-radius: 10px; padding: 11px 26px; font-size: 13px; font-weight: 700;
+  cursor: pointer; text-decoration: none; display: inline-block;
+  transition: all .2s; letter-spacing: -.1px;
+  box-shadow: 0 4px 16px rgba(59,130,246,.25);
+}
+.btn-primary:hover { opacity: .9; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(59,130,246,.35); }
+.btn-secondary {
+  background: transparent; color: #93c5fd; border: 1px solid var(--border);
+  border-radius: 10px; padding: 11px 26px; font-size: 13px; font-weight: 500;
+  cursor: pointer; text-decoration: none; display: inline-block; transition: all .2s;
+}
+.btn-secondary:hover { border-color: #3b82f6; color: var(--text); background: rgba(59,130,246,.06); }
+
+/* ── Renewal note ── */
+.renewal-note {
+  background: rgba(34,197,94,.06); border: 1px solid rgba(34,197,94,.12);
+  border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #4ade80; margin-top: 14px;
+}
+
+/* ── Divider ── */
+.result-divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+
+/* ── Confirm email ── */
+.email-confirm { color: var(--muted); font-size: 12px; margin-top: 6px; }
 """
 
 # ── Template HTML de la página de pago ────────────────────────────────────────
@@ -2039,9 +2322,8 @@ _PAGO_HTML_TEMPLATE = """<!DOCTYPE html>
             min-height: 100vh; overflow-x: hidden; }}
 
     /* ── Ambient background ─────────────────────────────────────────────── */
-    body::before {{ content: ''; position: fixed; top: -200px; left: 50%; transform: translateX(-50%);
-      width: 800px; height: 500px; border-radius: 50%;
-      background: radial-gradient(ellipse, rgba(59,130,246,.08) 0%, transparent 70%);
+    body::before {{ content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(ellipse 900px 560px at 50% -80px, rgba(59,130,246,.09), transparent);
       pointer-events: none; z-index: 0; }}
 
     /* ── Header ─────────────────────────────────────────────────────────── */
@@ -2129,8 +2411,15 @@ _PAGO_HTML_TEMPLATE = """<!DOCTYPE html>
     }}
     .estado-item {{
       background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
-      padding: 18px 20px;
+      padding: 18px 20px; position: relative; overflow: hidden;
     }}
+    .estado-item::before {{
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--item-accent, #334155), transparent);
+    }}
+    .estado-item.accent-green {{ --item-accent: #22c55e; }}
+    .estado-item.accent-blue  {{ --item-accent: #3b82f6; }}
+    .estado-item.accent-amber {{ --item-accent: #f59e0b; }}
     .estado-item-label {{
       font-size: 11px; font-weight: 600; color: var(--muted);
       text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px;
@@ -2262,7 +2551,35 @@ _PAGO_HTML_TEMPLATE = """<!DOCTYPE html>
     .badge {{ background: linear-gradient(135deg, #2563eb, #3b82f6); color: white; }}
     .badge.verde {{ background: linear-gradient(135deg, #16a34a, #22c55e); color: white; }}
 
-    .plan-titulo {{ font-size: 14px; font-weight: 700; margin-bottom: 16px; color: #e2e8f0; }}
+    /* ── Plan card icon ────────────────────────────────────────────────── */
+    .plan-icon {{
+      width: 36px; height: 36px; border-radius: 10px;
+      background: rgba(59,130,246,.1); border: 1px solid rgba(59,130,246,.2);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 16px;
+    }}
+    .plan-card.destacado .plan-icon {{
+      background: rgba(59,130,246,.18); border-color: rgba(59,130,246,.35);
+      box-shadow: 0 0 16px rgba(59,130,246,.15);
+    }}
+
+    /* Plan card top accent line */
+    .plan-card::before {{
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(59,130,246,.2), transparent);
+      border-radius: var(--radius) var(--radius) 0 0;
+    }}
+    .plan-card.destacado::before {{
+      background: linear-gradient(90deg, transparent, var(--blue), transparent);
+    }}
+
+    /* Unit price */
+    .plan-unit-price {{
+      font-size: 11px; color: var(--muted); font-weight: 500;
+      margin-bottom: 12px; letter-spacing: .1px;
+    }}
+
+    .plan-titulo {{ font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #e2e8f0; }}
 
     .plan-precio {{ display: flex; align-items: baseline; gap: 5px; margin-bottom: 12px; }}
     .precio-monto {{ font-size: 32px; font-weight: 800; color: var(--text);

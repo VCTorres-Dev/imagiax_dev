@@ -13,15 +13,18 @@ Dependencias:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
 from typing import Any
 from urllib.parse import quote, unquote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
+
+from imagiax_auth import get_current_user, UserPayload
 
 from transbank.webpay.oneclick.mall_inscription import MallInscription
 from transbank.webpay.oneclick.mall_transaction import MallTransaction
@@ -62,6 +65,19 @@ def _get_transaction() -> MallTransaction:
 router = APIRouter(prefix="/tbk", tags=["transbank-oneclick"])
 
 
+# ── Async wrapper for sync TBK SDK calls (SEC-AI-002, AD-7) ──────────────────
+
+async def _tbk_call(fn, *args, **kwargs):
+    """
+    Runs synchronous Transbank SDK calls in a thread pool executor.
+    Prevents blocking the asyncio event loop during long-running SDK I/O calls.
+    (SEC-AI-002, AD-7)
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+
+
+
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class InscribirRequest(BaseModel):
@@ -82,17 +98,18 @@ class EliminarRequest(BaseModel):
 # ── Endpoints de Inscripción ──────────────────────────────────────────────────
 
 @router.post("/inscribir/iniciar")
-async def inscribir_iniciar(req: InscribirRequest):
+async def inscribir_iniciar(req: InscribirRequest, user: UserPayload = Depends(get_current_user)):
     """
     Paso 1: Inicia la inscripción Oneclick.
     Retorna token + url_webpay para redirigir al usuario a Transbank.
     """
-    # Incluir username en response_url para recuperarlo en el callback
-    response_url = f"{IMAGIAX_BASE_URL}/tbk/inscribir/finalizar?username={quote(req.username)}"
+    # response_url NO lleva usuario_id — se guarda server-side en tbk_pending
+    response_url = f"{IMAGIAX_BASE_URL}/tbk/inscribir/finalizar"
 
     try:
         inscription = _get_inscription()
-        resp = inscription.start(
+        resp = await _tbk_call(
+            inscription.start,
             username=req.username,
             email=req.email,
             response_url=response_url,
@@ -107,6 +124,9 @@ async def inscribir_iniciar(req: InscribirRequest):
     if not token or not url_webpay:
         logger.error("Respuesta inesperada de Transbank start: %s", resp)
         raise HTTPException(502, "Respuesta inválida de Transbank al iniciar inscripción")
+
+    # Guardar mapeo TBK_TOKEN → usuario_id en DB (TTL 10 min, uso único)
+    await imagiax_pagos_db.tbk_pending_save(token, user.user_id, req.username)
 
     logger.info("Inscripción Oneclick iniciada para %s — token: %s...", req.username, token[:16])
 
@@ -135,11 +155,11 @@ async def inscribir_finalizar(request: Request):
 
     try:
         inscription = _get_inscription()
-        resp = inscription.finish(token=tbk_token)
+        resp = await _tbk_call(inscription.finish, token=tbk_token)
     except Exception as exc:
         logger.error("Error finalizando inscripción Oneclick: %s", exc)
         return RedirectResponse(
-            url=f"{IMAGIAX_BASE_URL}/pagar?tbk_status=error&msg={exc}",
+            url=f"{IMAGIAX_BASE_URL}/pagar?tbk_status=error&msg=tbk_error",  # SEC-AI-003: opaque error code
             status_code=303,
         )
 
@@ -167,11 +187,16 @@ async def inscribir_finalizar(request: Request):
     # Extraer últimos 4 dígitos
     last4 = card_number[-4:] if len(card_number) >= 4 else card_number
 
-    # Recuperar username del token — en Transbank, el username se pasó en start()
-    # pero no se retorna en finish(). Lo buscamos en la respuesta o usamos un valor genérico.
-    # Nota: En un sistema multi-usuario se guardaría el username en sesión/cache
-    # antes de redirigir. Para mono-usuario, usamos el email o un default.
-    username = unquote(request.query_params.get("username", "default_user"))
+    # Recuperar username y usuario_id desde DB server-side (no del query param)
+    pending = await imagiax_pagos_db.tbk_pending_pop(tbk_token)
+    if pending:
+        username = pending["username"]
+        usuario_id = pending["usuario_id"]
+    else:
+        # Fallback: si el registro expiró (>10 min) o ya fue consumido, usar query param como respaldo
+        username = unquote(request.query_params.get("username", "default_user"))
+        usuario_id = request.query_params.get("usuario_id") or None
+        logger.warning("tbk_pending no encontrado para token %s... — usando query params", tbk_token[:16])
 
     # Guardar inscripción en DB
     try:
@@ -181,6 +206,7 @@ async def inscribir_finalizar(request: Request):
             card_type=card_type,
             card_number_last4=last4,
             authorization_code=auth_code,
+            usuario_id=usuario_id,
         )
         logger.info(
             "Inscripción Oneclick exitosa: user=%s, tbk_user=%s, card=%s ***%s",
@@ -228,7 +254,8 @@ async def cobrar_scan_oneclick(
             amount=int(amount),
         )
 
-        resp = transaction.authorize(
+        resp = await _tbk_call(
+            transaction.authorize,
             username=username,
             tbk_user=tbk_user,
             parent_buy_order=parent_buy_order,
@@ -294,23 +321,38 @@ async def cobrar_scan_oneclick(
 
 
 @router.post("/cobrar")
-async def cobrar_endpoint(req: CobrarRequest):
-    """Endpoint manual para cobro silencioso (testing/admin)."""
-    inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick(req.username)
-    if not inscripcion:
-        raise HTTPException(404, "No hay tarjeta Oneclick inscrita para este usuario")
+async def cobrar_endpoint(req: CobrarRequest, user: UserPayload = Depends(get_current_user)):
+    """Endpoint manual para cobro silencioso (testing/admin).
 
+    SEGURIDAD (SEC-PAY-003 + SEC-PAY-004, AD-4):
+    Los campos username y amount del body son IGNORADOS.
+    - username se obtiene de la DB via usuario_id del JWT (previene IDOR)
+    - amount se fija al PRECIO_SCAN_CLP del servidor (previene manipulacion de precio)
+    """
+    # Override: ignorar username/amount del body — usar datos del JWT y constante del servidor
+    if req.username and req.username != user.email:
+        logger.warning(
+            "SECURITY: cobrar_endpoint body.username=%r ignorado, usando usuario_id=%s del JWT (IDOR prevention)",
+            req.username, user.user_id,
+        )
+
+    # Obtener inscripcion desde DB usando el usuario_id del JWT (no del body)
+    inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick_any(usuario_id=user.user_id)
+    if not inscripcion:
+        raise HTTPException(404, "No hay tarjeta Oneclick inscrita para tu cuenta")
+
+    # Cobrar con username de DB y monto del servidor (no del request body)
     aprobado, buy_order, error_msg = await cobrar_scan_oneclick(
-        username=req.username,
+        username=inscripcion["username"],  # FROM DB — no del body
         tbk_user=inscripcion["tbk_user"],
-        amount=req.amount,
+        amount=PRECIO_SCAN_CLP,  # SERVER constant — no del body
         descripcion=req.descripcion,
     )
 
     return JSONResponse({
         "aprobado": aprobado,
         "buy_order": buy_order,
-        "monto_clp": req.amount,
+        "monto_clp": PRECIO_SCAN_CLP,
         "error": error_msg,
     })
 
@@ -318,13 +360,9 @@ async def cobrar_endpoint(req: CobrarRequest):
 # ── Eliminar inscripción ──────────────────────────────────────────────────────
 
 @router.delete("/tarjeta")
-async def eliminar_tarjeta(req: EliminarRequest):
-    """Elimina la inscripción Oneclick del usuario."""
-    clean_username = unquote(req.username)
-    inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick(clean_username)
-    if not inscripcion:
-        # Fallback: buscar cualquier inscripción activa (mono-usuario)
-        inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick_any()
+async def eliminar_tarjeta(user: UserPayload = Depends(get_current_user)):
+    """Elimina la inscripción Oneclick del usuario autenticado."""
+    inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick_any(usuario_id=user.user_id)
     if not inscripcion:
         raise HTTPException(404, "No hay tarjeta Oneclick inscrita para este usuario")
 
@@ -350,13 +388,9 @@ async def eliminar_tarjeta(req: EliminarRequest):
 # ── Estado de inscripción ─────────────────────────────────────────────────────
 
 @router.get("/estado")
-async def estado_oneclick(username: str = "default_user"):
-    """Retorna el estado de la inscripción Oneclick del usuario."""
-    inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick(username)
-
-    if not inscripcion:
-        # Fallback: buscar cualquier inscripción activa (mono-usuario)
-        inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick_any()
+async def estado_oneclick(user: UserPayload = Depends(get_current_user)):
+    """Retorna el estado de la inscripción Oneclick del usuario autenticado."""
+    inscripcion = await imagiax_pagos_db.get_inscripcion_oneclick_any(usuario_id=user.user_id)
 
     if not inscripcion:
         return JSONResponse({
