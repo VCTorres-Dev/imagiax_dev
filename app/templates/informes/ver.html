@@ -20,6 +20,15 @@ background:#0a0f1e;color:#e2e8f0;min-height:100vh;{% if not_found %}display:flex
 .footer{text-align:center;margin-top:24px;color:#334155;font-size:11px}
 .card-nf{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:40px;max-width:400px;text-align:center}
 h1.nf{font-size:20px;margin-bottom:12px;color:#f87171}p.nf{color:#64748b;font-size:14px}
+@media print{
+  .header .verified{display:none}
+  body{background:white!important;color:black!important;padding:12px}
+  .card{background:white!important;border-color:#ccc!important;box-shadow:none!important}
+  .meta-item span,.informe-body{color:black!important}
+  .meta-item label{color:#555!important}
+  .footer{color:#555!important}
+  .report-content{max-width:100%}
+}
 </style></head>
 <body>
 {% if not_found %}

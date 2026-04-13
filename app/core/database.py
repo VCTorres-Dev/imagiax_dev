@@ -34,7 +34,7 @@ logger = logging.getLogger("imagiax.db")
 async def create_pool(
     dsn: str,
     min_size: int = 2,
-    max_size: int = 10,
+    max_size: int = 20,
 ) -> asyncpg.Pool:
     """Create and return a new asyncpg connection pool.
 
@@ -45,6 +45,8 @@ async def create_pool(
         dsn: PostgreSQL connection string (e.g. postgresql://...).
         min_size: Minimum number of connections to keep open.
         max_size: Maximum number of simultaneous connections.
+            # Pool sizing: AI analysis (long-running) + dashboard + webhooks + admin queries
+            # 20 connections handles ~4 concurrent AI analyses + normal traffic
 
     Returns:
         An initialised asyncpg.Pool.

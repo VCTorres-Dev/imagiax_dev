@@ -59,6 +59,46 @@ UMBRALES["Enlarged Cardiomediastinum"] = 0.6
 
 
 # ============================================================
+# Shared DICOM pixel preprocessing helper
+# ============================================================
+
+
+def _preprocess_dicom_pixels(ds: pydicom.Dataset) -> np.ndarray:
+    """Extract and normalize pixel data from a DICOM dataset.
+
+    Shared by both ``dicom_to_tensor`` and ``dicom_to_png_bytes`` to avoid
+    duplicate MONOCHROME1 inversion and percentile-scaling logic.
+
+    Steps:
+      1. Read pixel_array as float32.
+      2. Apply Modality LUT (RescaleSlope/Intercept) if present.
+      3. Invert MONOCHROME1 images (luminance is inverted in that encoding).
+      4. Robust percentile normalisation (p1–p99) → uint8.
+
+    Args:
+        ds: pydicom Dataset (already read from bytes).
+
+    Returns:
+        Normalised 8-bit NumPy array (same H×W shape as the original).
+    """
+    pixel_data = ds.pixel_array.astype(np.float32)
+    pixel_data = apply_modality_lut(pixel_data, ds).astype(np.float32)
+
+    photometric = str(getattr(ds, "PhotometricInterpretation", ""))
+    if photometric.upper() == "MONOCHROME1":
+        pixel_data = np.max(pixel_data) - pixel_data
+
+    p1 = np.percentile(pixel_data, 1)
+    p99 = np.percentile(pixel_data, 99)
+    if p99 <= p1:
+        p1 = float(np.min(pixel_data))
+        p99 = float(np.max(pixel_data)) + 1e-6
+
+    img_8u = np.clip((pixel_data - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
+    return img_8u
+
+
+# ============================================================
 # DICOM → Tensor (ResNet50 inference path)
 # ============================================================
 
@@ -93,23 +133,10 @@ def dicom_to_tensor(dicom_bytes: bytes, device: torch.device | None = None) -> t
     if "PixelData" not in dataset:
         raise ValueError("The DICOM file contains no PixelData")
 
-    pixel_data = dataset.pixel_array.astype(np.float32)
-    pixel_data = apply_modality_lut(pixel_data, dataset).astype(np.float32)
+    # Shared MONOCHROME1 correction + percentile normalisation
+    img_8u = _preprocess_dicom_pixels(dataset)
 
-    photometric = str(getattr(dataset, "PhotometricInterpretation", ""))
-    if photometric.upper() == "MONOCHROME1":
-        pixel_data = np.max(pixel_data) - pixel_data
-
-    # Robust percentile scaling (avoids extreme outliers)
-    p01 = np.percentile(pixel_data, 1)
-    p99 = np.percentile(pixel_data, 99)
-    if p99 <= p01:
-        p01 = float(np.min(pixel_data))
-        p99 = float(np.max(pixel_data)) + 1e-6
-
-    img_01 = np.clip((pixel_data - p01) / (p99 - p01), 0.0, 1.0)
-    img_8u = (img_01 * 255.0).astype(np.uint8)
-
+    # ResNet50-specific: CLAHE contrast enhancement
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     img_8u = clahe.apply(img_8u)
 
@@ -138,19 +165,9 @@ def dicom_to_png_bytes(raw_bytes: bytes) -> bytes:
         PNG image as bytes.
     """
     ds = pydicom.dcmread(io.BytesIO(raw_bytes), force=True)
-    pixel_data = ds.pixel_array.astype(np.float32)
-    pixel_data = apply_modality_lut(pixel_data, ds).astype(np.float32)
 
-    photometric = str(getattr(ds, "PhotometricInterpretation", ""))
-    if photometric.upper() == "MONOCHROME1":
-        pixel_data = np.max(pixel_data) - pixel_data
-
-    p1 = np.percentile(pixel_data, 1)
-    p99 = np.percentile(pixel_data, 99)
-    if p99 <= p1:
-        p1, p99 = float(np.min(pixel_data)), float(np.max(pixel_data)) + 1e-6
-
-    img_8u = np.clip((pixel_data - p1) / (p99 - p1) * 255, 0, 255).astype(np.uint8)
+    # Shared MONOCHROME1 correction + percentile normalisation
+    img_8u = _preprocess_dicom_pixels(ds)
 
     h, w = img_8u.shape[:2]
     if max(h, w) > 1536:

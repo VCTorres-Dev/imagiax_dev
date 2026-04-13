@@ -11,12 +11,12 @@
 
   "HttpServerEnabled": true,
   "HttpPort": 8042,
-  "HttpDescribeErrors": true,
+  "HttpDescribeErrors": false,
   "HttpCompressionEnabled": true,
 
   "DicomServerEnabled": true,
   "DicomAet": "IMAGIAX",
-  "DicomCheckCalledAet": false,
+  "DicomCheckCalledAet": true,
   "DicomPort": 4242,
   "DefaultEncoding": "Latin1",
 
@@ -34,13 +34,14 @@
   "SslEnabled": false,
   "AuthenticationEnabled": true,
   "RegisteredUsers": {
-    "imagiax": "ImagiaxPACS_2026!"
+    "imagiax": "CHANGE_ME_USE_ORTHANC_PASSWORD_ENV_VAR"
   },
 
   "DicomModalities": {},
   "DicomModalitiesInDatabase": false,
   "DicomAlwaysAllowEcho": true,
-  "DicomAlwaysAllowStore": true,
+  "DicomAlwaysAllowStore": false,
+  "_comment_dicom_security": "DICOM store requires matching AET (DicomCheckCalledAet=true, DicomAlwaysAllowStore=false). If this causes issues with your modality, set DicomAlwaysAllowStore back to true and document the risk.",
   "DicomCheckModalityHost": false,
   "DicomScuTimeout": 10,
   "OrthancPeers": {},

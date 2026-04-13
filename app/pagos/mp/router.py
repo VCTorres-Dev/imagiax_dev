@@ -723,10 +723,15 @@ async def verificar_pago_manual(
 async def historial_cobros(
     request: Request,
     periodo: str = Query("total"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     user: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
     """
     Vista administrativa de TODAS las transacciones de la plataforma.
+
+    SEC-M03: Mandatory pagination via limit/offset (default 100, max 500).
+    Caller admin_id is passed to get_historial_cobros for audit logging.
 
     NOTA: Este endpoint muestra transacciones de TODOS los médicos/usuarios,
     no solo del usuario logueado. Esto es por diseño — es una herramienta de
@@ -737,7 +742,9 @@ async def historial_cobros(
     Ver BUG-013.
     """
     pool = request.app.state.pool
-    historial = await pagos_db.get_historial_cobros(pool, periodo)
+    historial = await pagos_db.get_historial_cobros(
+        pool, periodo, limit=limit, offset=offset, admin_id=user.user_id
+    )
     return JSONResponse(historial)
 
 
@@ -753,7 +760,9 @@ async def exportar_excel(
     from openpyxl.utils import get_column_letter
 
     pool = request.app.state.pool
-    historial = await pagos_db.get_historial_cobros(pool, periodo)
+    historial = await pagos_db.get_historial_cobros(
+        pool, periodo, limit=500, offset=0, admin_id=user.user_id
+    )
     cobros = historial.get("cobros", [])
     resumen = historial.get("resumen", {})
 

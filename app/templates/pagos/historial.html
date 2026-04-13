@@ -146,6 +146,21 @@
     .cell-desc{max-width:140px}
     .filters{overflow-x:auto}
   }
+  /* RESP-M4: touch targets ≥44px for pagination/filter buttons on mobile */
+  @media(max-width:768px){
+    .f-btn{
+      min-height:44px;
+      min-width:44px;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+    }
+    .topbar-actions .btn-sm{
+      min-height:44px;
+      display:inline-flex;
+      align-items:center;
+    }
+  }
 </style>
 </head>
 <body>

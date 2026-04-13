@@ -1,14 +1,43 @@
 # ============================================================
-# IMAGIAX — Backend FastAPI
+# IMAGIAX — Backend FastAPI — Multi-stage build
 # Compatible con ARM64 (Oracle Cloud Always Free) y x86_64
+#
+# LOW-5: Two stages — builder installs gcc + compiles wheels,
+# runtime image receives only the installed packages (no gcc).
 #
 # El modelo resnet50-res512-all se descarga automáticamente
 # la primera vez que arranca (~90 MB, se cachea en volumen Docker)
 # ============================================================
 
+# ── Builder ──────────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+# Build-time system dependencies (gcc, python3-dev needed to compile C extensions
+# in some packages like psutil, cryptography, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY requirements.txt .
+
+# PyTorch CPU — instalado primero, separado del resto.
+# --index-url cpu garantiza la variante sin CUDA, compatible con ARM64.
+# --prefix=/install puts everything into a single relocatable directory.
+RUN pip install --no-cache-dir --prefix=/install \
+    torch==2.6.0 \
+    torchvision==0.21.0 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Resto de dependencias (lee requirements.txt)
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ── Runtime ──────────────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Dependencias del sistema para opencv-headless, scikit-image y HEALTHCHECK
+# Runtime-only system libraries (no gcc, no build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libsm6 \
@@ -16,27 +45,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgomp1 \
     libgl1 \
-    gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Copy compiled packages from builder stage
+COPY --from=builder /install /usr/local
 
 # Usuario no-root dedicado — el proceso nunca corre como root en producción
 RUN groupadd --gid 1001 imagiax \
     && useradd --uid 1001 --gid 1001 --create-home --shell /sbin/nologin imagiax
 
 WORKDIR /app
-
-COPY requirements.txt .
-
-# PyTorch CPU — instalado primero, separado del resto.
-# --index-url cpu garantiza la variante sin CUDA, compatible con ARM64.
-RUN pip install --no-cache-dir \
-    torch==2.6.0 \
-    torchvision==0.21.0 \
-    --index-url https://download.pytorch.org/whl/cpu
-
-# Resto de dependencias (lee requirements.txt)
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar el paquete app/ (nuevo entry point: app.main:create_app)
 COPY app/ ./app/

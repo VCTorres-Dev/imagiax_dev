@@ -88,9 +88,12 @@ class CSRFOriginMiddleware(BaseHTTPMiddleware):
 # Shared with logging formatters so every log line carries the request ID.
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
-# -- Rate limiter: 10 analysis requests per IP per minute ---------------------
-# Protects Gemini API and PyTorch inference from abuse.
-_analysis_limiter = RateLimiter(max_requests=10, window_seconds=60)
+# -- Rate limiter: secondary defense for analysis endpoints (5r/m per worker) --
+# NOTE: This is a secondary defense layer.
+# Primary rate limiting is done by nginx (see nginx-rate-zones.conf).
+# nginx analisis_zone = 10r/m; in-process limit = 5r/m (50% of nginx).
+# With 4 workers, worst-case combined = 20r/m (~2× nginx limit).
+_analysis_limiter = RateLimiter(max_requests=5, window_seconds=60)
 
 # Prefixes that are subject to rate limiting
 _RATE_LIMITED_PREFIXES = ("/analizar/", "/generar/", "/ai/analizar", "/ai/generar")

@@ -915,14 +915,38 @@ async def buscar_pago_por_mp_id(pool: asyncpg.Pool, mp_payment_id: str) -> dict[
     return _row_to_dict(row) if row else None
 
 
-async def get_historial_cobros(pool: asyncpg.Pool, periodo: str = "total") -> dict[str, Any]:
+async def get_historial_cobros(
+    pool: asyncpg.Pool,
+    periodo: str = "total",
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    admin_id: str | None = None,
+) -> dict[str, Any]:
     """
     Obtiene el historial de cobros unificado (MercadoPago + Transbank) con filtro temporal.
     periodo: "dia", "semana", "mes", "trimestre", "anio", "total"
 
+    SEC-M03: Mandatory pagination via limit/offset to prevent unbounded RUT/PHI export.
+    Default limit is 100 rows. Callers MUST pass admin_id for audit logging.
+
     NOTA: Este query es INTENCIONALMENTE sin filtro por usuario_id — es una vista
     administrativa que muestra TODAS las transacciones de la plataforma. Ver BUG-013.
     """
+    # SEC-M03: Clamp limit to a safe maximum to prevent accidental full-table dumps.
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    page = offset // limit if limit else 0
+
+    # SEC-M03: Audit log — record every admin export of cobros (includes RUT/PHI data).
+    logger.info(
+        "Admin %s exported cobros page %d (periodo=%s, limit=%d, offset=%d)",
+        admin_id or "unknown",
+        page,
+        periodo,
+        limit,
+        offset,
+    )
     _INTERVALOS = {
         "dia":       timedelta(days=1),
         "semana":    timedelta(days=7),
@@ -957,8 +981,11 @@ async def get_historial_cobros(pool: asyncpg.Pool, periodo: str = "total") -> di
                     SELECT * FROM ({_UNION_BASE}) AS cobros
                     WHERE created_at >= $1
                     ORDER BY created_at DESC
+                    LIMIT $2 OFFSET $3
                     """,
                     cutoff,
+                    limit,
+                    offset,
                 )
                 total_row = await conn.fetchrow(
                     f"""
@@ -976,7 +1003,10 @@ async def get_historial_cobros(pool: asyncpg.Pool, periodo: str = "total") -> di
                     f"""
                     SELECT * FROM ({_UNION_BASE}) AS cobros
                     ORDER BY created_at DESC
-                    """
+                    LIMIT $1 OFFSET $2
+                    """,
+                    limit,
+                    offset,
                 )
                 total_row = await conn.fetchrow(
                     f"""
@@ -992,6 +1022,7 @@ async def get_historial_cobros(pool: asyncpg.Pool, periodo: str = "total") -> di
         return {
             "periodo": periodo,
             "cobros": [],
+            "pagination": {"limit": limit, "offset": offset, "page": page},
             "resumen": {"total_gastado": 0, "total_transacciones": 0, "aprobados": 0, "rechazados": 0},
         }
 
@@ -1000,6 +1031,7 @@ async def get_historial_cobros(pool: asyncpg.Pool, periodo: str = "total") -> di
     return {
         "periodo": periodo,
         "cobros": cobros,
+        "pagination": {"limit": limit, "offset": offset, "page": page},
         "resumen": {
             "total_gastado": total_row["total_gastado"],
             "total_transacciones": total_row["total_transacciones"],

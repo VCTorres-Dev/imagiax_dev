@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import HTTPException
 from google import genai
 
+from app.ai.constants import NOMBRES_ES
 from app.ai.dicom_service import dicom_to_png_bytes
 from app.ai.prompt_orchestrator import assemble_prompt
 from app.core.config import settings
@@ -107,33 +108,10 @@ async def call_gemini_json(
 # Fallback report (no LLM)
 # ============================================================
 
-#: Pathology names in Spanish — used by both the main report and the fallback.
-_NOMBRES_ES: dict[str, str] = {
-    "Atelectasis": "Atelectasia",
-    "Cardiomegaly": "Cardiomegalia",
-    "Effusion": "Derrame pleural",
-    "Infiltrate": "Infiltrado pulmonar",
-    "Infiltration": "Infiltrado pulmonar",
-    "Mass": "Masa pulmonar",
-    "Nodule": "Nódulo pulmonar",
-    "Pneumonia": "Neumonía",
-    "Pneumothorax": "Neumotórax",
-    "Consolidation": "Consolidación pulmonar",
-    "Edema": "Edema pulmonar",
-    "Emphysema": "Enfisema pulmonar",
-    "Fibrosis": "Fibrosis pulmonar",
-    "Pleural_Thickening": "Engrosamiento pleural",
-    "Hernia": "Hernia diafragmática",
-    "Lung Lesion": "Lesión pulmonar",
-    "Fracture": "Fractura",
-    "Lung Opacity": "Opacidad pulmonar",
-    "Enlarged Cardiomediastinum": "Ensanchamiento mediastínico",
-}
-
 
 def nombre_es_patologia(pat_raw: str) -> str:
     """Return the Spanish display name for a NIH pathology label."""
-    return _NOMBRES_ES.get(pat_raw, pat_raw)
+    return NOMBRES_ES.get(pat_raw, pat_raw)
 
 
 def _generar_informe_fallback(
@@ -417,6 +395,9 @@ REGLAS:
     client = get_gemini_client()
 
     # ── Retry with exponential back-off (handles 429 and transient 5xx) ───────
+    # Per-attempt timeout: 60 s. Worst-case total: 4 × 60 + 35 (backoff: 5+10+20) = 275 s.
+    # Ensure PIPELINE_GLOBAL_TIMEOUT (config) is set > 275 s to avoid premature pipeline
+    # cancellation before all retries are exhausted.
     last_exc: Exception | None = None
     for _attempt in range(4):  # attempts: 0, 1, 2, 3
         try:
@@ -430,13 +411,13 @@ REGLAS:
                         max_output_tokens=4096,
                     ),
                 ),
-                timeout=90.0,
+                timeout=60.0,
             )
             return response.text or "", False
 
         except asyncio.TimeoutError:
             last_exc = TimeoutError(
-                f"Gemini did not respond in 90 s (attempt {_attempt + 1}/4)"
+                f"Gemini did not respond in 60 s (attempt {_attempt + 1}/4)"
             )
             logger.warning("Gemini timeout attempt %d/4", _attempt + 1)
             if _attempt < 3:

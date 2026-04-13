@@ -90,16 +90,24 @@ async def get_current_user(
     if needs_renewal and from_cookie:
         try:
             fp = generate_session_fingerprint(request) if request else None
+            # SEC-H03: Preserve the original session type from the `remember` claim.
+            # Old JWTs without the claim default to remember=False (normal session duration).
+            # This prevents normal sessions from being silently extended to remember-me lifetime.
+            if user.remember:
+                renewal_hours = float(settings.JWT_REMEMBER_HOURS)
+                renewal_max_age = int(settings.JWT_REMEMBER_HOURS * 3600)
+            else:
+                renewal_hours = float(settings.JWT_EXPIRE_HOURS)
+                renewal_max_age = int(settings.JWT_EXPIRE_HOURS * 3600)
+
             new_token = create_access_token(
                 user_id=user.user_id,
                 email=user.email,
                 nombre=user.nombre,
                 rol=user.rol,
-                # Preserve the original expiry window: we don't know if it was a
-                # "remember me" session, so we use JWT_REMEMBER_HOURS as the safe
-                # upper bound — a normal 24h session will also fall within this.
-                expire_hours=float(settings.JWT_REMEMBER_HOURS),
+                expire_hours=renewal_hours,
                 fingerprint=fp,
+                remember=user.remember,
             )
             response.set_cookie(
                 key="imagiax_session",
@@ -107,12 +115,12 @@ async def get_current_user(
                 httponly=True,
                 secure=settings.is_production,
                 samesite="strict",
-                max_age=int(settings.JWT_REMEMBER_HOURS * 3600),
+                max_age=renewal_max_age,
                 path="/",
             )
             logger.debug(
                 "JWT sliding-window renewal issued",
-                extra={"user_id": user.user_id[:8] + "..."},
+                extra={"user_id": user.user_id[:8] + "...", "remember": user.remember},
             )
         except Exception as exc:
             # Renewal failure must never block the authenticated request

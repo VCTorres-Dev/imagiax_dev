@@ -2,26 +2,13 @@
 <html lang="es">
 <head>
 <script>
-window.onerror = function(msg, url, lineNo, columnNo, error) {
-  var string = msg.toLowerCase();
-  var message = [
-    'Message: ' + msg,
-    'URL: ' + url,
-    'Line: ' + lineNo,
-    'Column: ' + columnNo,
-    'Error object: ' + JSON.stringify(error)
-  ].join(' - ');
-  alert(message);
-  var el = document.createElement("div");
-  el.style.position = "fixed";
-  el.style.top = "0";
-  el.style.left = "0";
-  el.style.zIndex = "999999";
-  el.style.background = "red";
-  el.style.color = "white";
-  el.style.padding = "20px";
-  el.innerText = message;
-  document.body.appendChild(el);
+window.onerror = function(msg, url, line) {
+  console.error('Error:', msg, 'at', url + ':' + line);
+  var toast = document.createElement('div');
+  toast.className = 'error-toast';
+  toast.textContent = 'Error inesperado. Recargá la página si algo no funciona.';
+  document.body.appendChild(toast);
+  setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 8000);
   return false;
 };
 </script>
@@ -37,7 +24,11 @@ window.onerror = function(msg, url, lineNo, columnNo, error) {
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.13/dist/gsap.min.js" defer crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.13/dist/Observer.min.js" defer crossorigin="anonymous"></script>
+<!-- TODO: Extract CSS to /static/admin/admin.css for browser caching (Cache-Control: max-age=31536000) -->
 <style>
+/* ── Error toast (replaces alert in window.onerror) ───────────────────── */
+.error-toast{position:fixed;bottom:20px;right:20px;background:var(--danger-600,#dc2626);color:#fff;padding:12px 20px;border-radius:8px;font-size:0.875rem;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:toast-in .3s ease-out}
+@keyframes toast-in{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#0a0f1e;--bg2:#0f1629;--bg3:#111827;--bg4:#1a2235;
@@ -289,8 +280,8 @@ select option{background:var(--bg3)}
 .search-bar{
   display:flex;gap:10px;align-items:center;flex-wrap:wrap;
 }
-.search-bar input{width:240px}
-.search-bar select{width:160px}
+.search-bar input{width:240px;max-width:100%}
+.search-bar select{width:160px;max-width:100%}
 
 /* ── Toast ─────────────────────────────────── */
 #toast{
@@ -1029,11 +1020,178 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
 .topbar-title,.modal-header h3,.table-header h2{font-family:var(--font-heading)}
 .stat-card .value,.estado-tile .tile-num{font-family:var(--font-heading)}
 
+/* ── Hamburger button ───────────────────────── */
+.hamburger-btn{
+  display:none;
+  position:fixed;top:12px;left:12px;
+  z-index:1001;
+  background:var(--blue2);color:white;
+  border:none;border-radius:var(--radius3);
+  padding:0;width:44px;height:44px;
+  font-size:1.25rem;line-height:1;
+  cursor:pointer;
+  box-shadow:var(--shadow-md);
+  align-items:center;justify-content:center;
+  transition:background var(--transition)
+}
+.hamburger-btn:hover{background:var(--blue3)}
+
+/* ── Sidebar overlay (mobile) ───────────────── */
+.sidebar-overlay{
+  display:none;
+  position:fixed;inset:0;
+  background:rgba(0,0,0,.55);
+  z-index:999;
+  cursor:pointer
+}
+.sidebar-overlay.active{display:block}
+
+/* ── Charts row (dashboard) ─────────────────── */
+.charts-row{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px;
+  margin-bottom:20px
+}
+
+/* ── Sistema grid ───────────────────────────── */
+.sys-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px
+}
+
 /* ── Responsive ─────────────────────────────── */
 @media(max-width:768px){
-  #sidebar{display:none}
+  .hamburger-btn{display:flex}
+  #sidebar{
+    position:fixed;left:0;top:0;
+    height:100vh;
+    transform:translateX(-100%);
+    transition:transform 0.3s ease;
+    z-index:1000
+  }
+  #sidebar.open{transform:translateX(0)}
+  #main{margin-left:0!important}
+  .topbar{padding-left:68px}
   .stat-grid{grid-template-columns:1fr 1fr}
   .input-row{grid-template-columns:1fr}
+}
+@media(max-width:640px){
+  .charts-row{grid-template-columns:1fr}
+  .sys-grid{grid-template-columns:1fr}
+  .stat-grid{grid-template-columns:1fr}
+}
+
+/* ── RESP-C3: Table responsive wrapper ──────── */
+.table-responsive{
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  margin:0 -16px;
+  padding:0 16px;
+}
+@media(max-width:640px){
+  .col-hide-sm{display:none}
+}
+@media(max-width:768px){
+  .table td .btn,
+  .table td a{
+    min-height:44px;
+    min-width:44px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+  }
+}
+
+/* ── RESP-C4: Responsive filter inputs ──────── */
+.input-filter{
+  width:240px;
+  max-width:100%;
+}
+@media(max-width:480px){
+  .input-filter{
+    width:100%;
+  }
+}
+
+/* ── RESP-M1: Pagination touch targets ≥44px on mobile ── */
+@media(max-width:768px){
+  .pagination button,
+  .pagination .page-btn{
+    min-height:44px;
+    min-width:44px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    font-size:0.875rem;
+    padding:8px 14px;
+  }
+  .pagination{
+    gap:6px;
+    flex-wrap:wrap;
+    justify-content:center;
+  }
+}
+
+/* ── RESP-M3: Print styles — medical reports ── */
+@media print{
+  /* Hide non-essential UI */
+  .sidebar,#sidebar,
+  .hamburger-btn,
+  .sidebar-overlay,
+  .topbar,
+  .pagination,
+  .filters,
+  .table-actions,
+  #toast,
+  .modal-overlay{
+    display:none!important;
+  }
+
+  /* Full width for content */
+  #main,#app{
+    margin-left:0!important;
+    padding:0!important;
+    display:block!important;
+    width:100%!important;
+  }
+  .main-content,.page{
+    margin:0!important;
+    padding:12px!important;
+  }
+
+  /* Ensure tables fit page */
+  .table-responsive{
+    overflow:visible!important;
+  }
+  table{
+    font-size:10pt;
+    width:100%!important;
+  }
+  .col-hide-sm{
+    display:table-cell!important;
+  }
+
+  /* Page breaks */
+  .page-section,.card,.stat-card{
+    page-break-inside:avoid;
+  }
+
+  /* Clean backgrounds — black on white */
+  *,body,.main-content,.page,#main,#app,
+  .card,.stat-card,.table-wrap,
+  .bg3,td,th{
+    background:white!important;
+    color:black!important;
+    box-shadow:none!important;
+    border-color:#ccc!important;
+  }
+  a{color:black!important;text-decoration:underline}
+
+  /* Show only active page */
+  .page{display:none!important}
+  .page.active{display:block!important}
 }
 </style>
 </head>
@@ -1041,6 +1199,8 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
 <!-- imagiax-admin-html-rev: {{ admin_html_rev }} (debe coincidir con pie "Build …" y cabecera X-Imagiax-Admin-HTML-Rev) -->
 
 <!-- MAIN APP --><!-- MAIN APP --><!-- MAIN APP --><!-- MAIN APP --><!-- MAIN APP --><!-- MAIN APP -->
+<button class="hamburger-btn" id="hamburger-btn" onclick="toggleSidebar()" aria-label="Abrir menú" aria-expanded="false" aria-controls="sidebar">&#9776;</button>
+<div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div id="app">
   <!-- Sidebar -->
   <div id="sidebar">
@@ -1177,7 +1337,7 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
         </div>
 
         <!-- Charts row -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+        <div class="charts-row">
           <!-- Distribución por rol -->
           <div class="chart-card">
             <div class="chart-header">
@@ -1240,7 +1400,7 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
       <div style="padding:24px">
         <div class="table-header">
           <div class="search-bar">
-            <input type="text" id="user-search" placeholder="Buscar por nombre o email..." oninput="filterUsers()" style="width:240px" aria-label="Buscar usuarios">
+            <input type="text" id="user-search" placeholder="Buscar por nombre o email..." oninput="filterUsers()" class="input-filter" aria-label="Buscar usuarios">
             <select id="user-rol-filter" onchange="filterUsers()" aria-label="Filtrar por rol">
               <option value="">Todos los roles</option>
               <option value="superadmin">Superadmin</option>
@@ -1260,10 +1420,12 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
           </button>
         </div>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th>Nombre</th><th>Email</th><th>Rol</th><th>Estado</th><th>Creado</th><th style="text-align:right">Acciones</th></tr></thead>
+          <div class="table-responsive">
+          <table class="table">
+            <thead><tr><th>Nombre</th><th>Email</th><th>Rol</th><th>Estado</th><th class="col-hide-sm">Creado</th><th style="text-align:right">Acciones</th></tr></thead>
             <tbody id="users-tbody"><tr><td colspan="6" style="text-align:center;color:var(--text3);padding:24px">Cargando...</td></tr></tbody>
           </table>
+          </div>
         </div>
       </div>
     </div>
@@ -1288,10 +1450,12 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
           </button>
         </div>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th>Paciente</th><th>Médico</th><th>Modalidad</th><th>Alerta IA</th><th>Estado</th><th>Cobro</th><th style="min-width:140px">Fecha</th><th style="min-width:120px">Acciones</th></tr></thead>
+          <div class="table-responsive">
+          <table class="table">
+            <thead><tr><th>Paciente</th><th class="col-hide-sm">Médico</th><th class="col-hide-sm">Modalidad</th><th class="col-hide-sm">Alerta IA</th><th>Estado</th><th class="col-hide-sm">Cobro</th><th style="min-width:140px">Fecha</th><th style="min-width:120px">Acciones</th></tr></thead>
             <tbody id="informes-tbody"><tr><td colspan="8" style="text-align:center;color:var(--text3);padding:24px">Cargando...</td></tr></tbody>
           </table>
+          </div>
           <div class="pagination">
             <span class="page-info" id="inf-page-info"></span>
             <button id="inf-prev" onclick="loadInformes(infOffset-50)" disabled>← Anterior</button>
@@ -1344,7 +1508,7 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
       <div style="padding:24px">
         <div class="table-header">
           <div class="search-bar">
-            <input type="text" id="audit-user-filter" placeholder="Filtrar por email..." style="width:200px" aria-label="Filtrar auditoría por email" oninput="clearTimeout(window._auditEmailTimer);window._auditEmailTimer=setTimeout(()=>loadAuditoria(0),400)">
+            <input type="text" id="audit-user-filter" placeholder="Filtrar por email..." class="input-filter" aria-label="Filtrar auditoría por email" oninput="clearTimeout(window._auditEmailTimer);window._auditEmailTimer=setTimeout(()=>loadAuditoria(0),400)">
             <select id="audit-accion-filter" aria-label="Filtrar por acción de auditoría">
               <option value="">Todas las acciones</option>
               <option value="login">Login</option>
@@ -1363,10 +1527,12 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
           </button>
         </div>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Recurso</th><th>IP</th><th>Detalle</th></tr></thead>
+          <div class="table-responsive">
+          <table class="table">
+            <thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th class="col-hide-sm">Recurso</th><th class="col-hide-sm">IP</th><th>Detalle</th></tr></thead>
             <tbody id="audit-tbody"><tr><td colspan="6" style="text-align:center;color:var(--text3);padding:24px">Cargando...</td></tr></tbody>
           </table>
+          </div>
           <div class="pagination">
             <span class="page-info" id="audit-page-info"></span>
             <button id="audit-prev" onclick="loadAuditoria(auditOffset-100)" disabled>← Anterior</button>
@@ -1384,7 +1550,7 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           Información de la instancia IMAGIAX en ejecución.
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="sys-grid">
           <div class="sys-card">
             <div class="sys-card-title">Servicios</div>
             <div id="sys-services" style="display:flex;flex-direction:column;gap:10px"></div>
@@ -2035,6 +2201,32 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Navegación ──────────────────────────────────────────────────────────────────
+// ── Sidebar mobile toggle ──────────────────────────────────────────────────────
+function toggleSidebar() {
+  var sidebar = document.getElementById('sidebar');
+  var overlay = document.getElementById('sidebar-overlay');
+  var btn     = document.getElementById('hamburger-btn');
+  var isOpen  = sidebar.classList.contains('open');
+  if (isOpen) {
+    sidebar.classList.remove('open');
+    overlay.classList.remove('active');
+    btn.setAttribute('aria-expanded', 'false');
+  } else {
+    sidebar.classList.add('open');
+    overlay.classList.add('active');
+    btn.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function closeSidebar() {
+  var sidebar = document.getElementById('sidebar');
+  var overlay = document.getElementById('sidebar-overlay');
+  var btn     = document.getElementById('hamburger-btn');
+  sidebar.classList.remove('open');
+  overlay.classList.remove('active');
+  btn.setAttribute('aria-expanded', 'false');
+}
+
 function navigate(page, el) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   if (el) el.classList.add('active');
@@ -2046,6 +2238,8 @@ function navigate(page, el) {
   else if (page === 'pagos') loadPagos();
   else if (page === 'auditoria') loadAuditoria(0);
   else if (page === 'sistema') loadSistema();
+  // Auto-close sidebar on mobile after navigation
+  if (window.innerWidth <= 768) closeSidebar();
 }
 
 function navigateToInformes(estado) {
@@ -2155,7 +2349,7 @@ function renderUsers(users) {
       <td class="td-email">${escHtml(u.email)}</td>
       <td><span class="badge-pill ${rolBadge(u.rol)}">${u.rol}</span></td>
       <td><span class="badge-pill ${u.activo ? 'badge-green' : 'badge-red'}">${u.activo ? 'Activo' : 'Inactivo'}</span></td>
-      <td style="color:var(--text3);font-size:12px">${formatDate(u.created_at)}</td>
+      <td style="color:var(--text3);font-size:12px" class="col-hide-sm">${formatDate(u.created_at)}</td>
       <td>
         ${u.rol === 'superadmin' && currentUser.rol !== 'superadmin'
           ? '<span style="font-size:12px;color:var(--text3);font-style:italic">Protegido</span>'
@@ -2287,11 +2481,11 @@ async function loadInformes(offset) {
   tbody.innerHTML = d.items.map(i => `
     <tr>
       <td>${escHtml(i.patient_name || '—')}<br><span style="font-size:12px;color:var(--text3)">${i.patient_id||''}</span></td>
-      <td style="font-size:12px;color:var(--text2)">${escHtml(i.usuario_email || '—')}</td>
-      <td>${i.modalidad || '—'}</td>
-      <td><span class="badge-pill ${alertaBadge(i.ai_nivel_alerta)}">${i.ai_nivel_alerta}</span></td>
+      <td style="font-size:12px;color:var(--text2)" class="col-hide-sm">${escHtml(i.usuario_email || '—')}</td>
+      <td class="col-hide-sm">${i.modalidad || '—'}</td>
+      <td class="col-hide-sm"><span class="badge-pill ${alertaBadge(i.ai_nivel_alerta)}">${i.ai_nivel_alerta}</span></td>
       <td><span class="badge-pill ${estadoBadge(i.estado)}">${i.estado}</span></td>
-      <td style="font-size:12px">${i.cobro_estado === 'pagado' ? '<span style="color:var(--green)">'+((i.cobro_monto_clp||0).toLocaleString("es-CL"))+'</span>' : '<span style="color:var(--text3)">'+i.cobro_estado+'</span>'}</td>
+      <td style="font-size:12px" class="col-hide-sm">${i.cobro_estado === 'pagado' ? '<span style="color:var(--green)">'+((i.cobro_monto_clp||0).toLocaleString("es-CL"))+'</span>' : '<span style="color:var(--text3)">'+i.cobro_estado+'</span>'}</td>
       <td style="font-size:12px;color:var(--text3)">${formatDate(i.created_at)}</td>
       <td class="td-actions">
         <button class="btn btn-ghost btn-sm" onclick="openInformeModal('${escHtml(i.id)}')" title="Ver informe">
@@ -2526,8 +2720,8 @@ async function loadAuditoria(offset) {
       <td style="font-size:12px;color:var(--text3);white-space:nowrap">${formatDate(l.created_at)}</td>
       <td style="font-size:12px">${escHtml(l.usuario_email||'Sistema')}</td>
       <td><span class="badge-pill ${accionBadge(l.accion)}">${l.accion}</span></td>
-      <td style="font-size:12px;color:var(--text3)">${escHtml(l.recurso||'—')}</td>
-      <td style="font-size:12px;color:var(--text3)">${escHtml(l.ip||'—')}</td>
+      <td style="font-size:12px;color:var(--text3)" class="col-hide-sm">${escHtml(l.recurso||'—')}</td>
+      <td style="font-size:12px;color:var(--text3)" class="col-hide-sm">${escHtml(l.ip||'—')}</td>
       <td style="font-size:12px;color:var(--text3)">${escHtml(l.detalle||'—')}</td>
     </tr>
   `).join('');

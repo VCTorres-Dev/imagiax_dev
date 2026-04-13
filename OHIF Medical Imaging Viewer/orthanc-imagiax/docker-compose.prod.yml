@@ -18,11 +18,19 @@ services:
     # Puerto 8042 NO expuesto — accesible solo via red Docker interna (nginx → /pacs/)
     # Para subir DICOMs usar la UI de OHIF (boton Upload) o temporalmente mapear el puerto
     volumes:
-      - ./config/orthanc.json:/etc/orthanc/orthanc.json:ro
+      # Template con ${ORTHANC_PASSWORD} — el entrypoint hace envsubst antes de arrancar
+      - ./config/orthanc.json.template:/etc/orthanc/orthanc.json.template:ro
+      - ./orthanc-entrypoint.sh:/usr/local/bin/orthanc-entrypoint.sh:ro
       - orthanc-data:/var/lib/orthanc/db/
-    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/usr/local/bin/orthanc-entrypoint.sh"]
     environment:
       - ORTHANC_NAME=IMAGIAX-PACS
+      # La contraseña se toma del .env.production del servidor y se inyecta
+      # en orthanc.json.template via envsubst dentro del entrypoint script.
+      # NUNCA hardcodear aquí — siempre leer del archivo .env.production.
+    env_file:
+      - ../../.env.production    # provee ORTHANC_PASSWORD (y otras vars)
+    restart: unless-stopped
 
   # ── PostgreSQL ────────────────────────────────────────────────────────────────
   postgres:
@@ -140,6 +148,8 @@ services:
     volumes:
       # Montado como template — envsubst reemplaza ${ORTHANC_AUTH_HEADER} al iniciar
       - ./config/nginx-proxy.conf:/etc/nginx/templates/default.conf.template:ro
+      # LOW-1: security headers snippet — included by every location with add_header
+      - ./config/security-headers.conf:/etc/nginx/conf.d/security-headers.conf:ro
       # Certificados SSL de Let's Encrypt (certbot los escribe en el host)
       - /etc/letsencrypt:/etc/letsencrypt:ro
       # Directorio webroot para el challenge ACME de certbot

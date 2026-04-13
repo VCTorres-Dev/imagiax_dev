@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, memo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import jsPDF from 'jspdf';
 import QRCode from 'qrcode';
 import { useActiveViewportDisplaySets, utils } from '@ohif/core';
@@ -97,25 +97,28 @@ const PDF_THEME = {
   spacing: { sectionGap: 8, margins: { l: 20, r: 20, t: 25, b: 30 } },
 } as const;
 
-// Cargar config dinámica del backend (doctor/clínica configurables)
-let _configLoaded = false;
+// PERF-H5: Promise-based singleton prevents double-fetch on simultaneous mounts.
+// Old _configLoaded boolean was not safe when two component instances mounted
+// concurrently — both could pass the `if (_configLoaded)` guard before either
+// resolved and set the flag.
+let _configPromise: Promise<void> | null = null;
 async function loadBackendConfig(): Promise<void> {
-  if (_configLoaded) return;
-  try {
-    const resp = await fetch(`${IMAGIAX_BACKEND}/config/frontend`, { credentials: 'include' });
-    if (resp.ok) {
-      const cfg = await resp.json();
-      if (cfg.doctor_name) DOCTOR_NAME = cfg.doctor_name;
-      if (cfg.doctor_specialty) DOCTOR_SPECIALTY = cfg.doctor_specialty;
-      if (cfg.doctor_license) DOCTOR_LICENSE = cfg.doctor_license;
-      if (cfg.brand_name) BRAND_NAME = cfg.brand_name;
-      if (cfg.brand_subtitle) BRAND_SUBTITLE = cfg.brand_subtitle;
-      // Optional institutional contact fields — use backend value if present
-      if (cfg.institution_phone) INSTITUTION_PHONE = cfg.institution_phone;
-      if (cfg.institution_url)   INSTITUTION_URL   = cfg.institution_url;
-      _configLoaded = true;
-    }
-  } catch { /* backend no disponible aún, se usan defaults */ }
+  return (_configPromise ??= (async () => {
+    try {
+      const resp = await fetch(`${IMAGIAX_BACKEND}/config/frontend`, { credentials: 'include' });
+      if (resp.ok) {
+        const cfg = await resp.json();
+        if (cfg.doctor_name) DOCTOR_NAME = cfg.doctor_name;
+        if (cfg.doctor_specialty) DOCTOR_SPECIALTY = cfg.doctor_specialty;
+        if (cfg.doctor_license) DOCTOR_LICENSE = cfg.doctor_license;
+        if (cfg.brand_name) BRAND_NAME = cfg.brand_name;
+        if (cfg.brand_subtitle) BRAND_SUBTITLE = cfg.brand_subtitle;
+        // Optional institutional contact fields — use backend value if present
+        if (cfg.institution_phone) INSTITUTION_PHONE = cfg.institution_phone;
+        if (cfg.institution_url)   INSTITUTION_URL   = cfg.institution_url;
+      }
+    } catch { /* backend no disponible aún, se usan defaults */ }
+  })());
 }
 
 async function getLogoPng(_size = 180): Promise<string> {
@@ -1393,7 +1396,8 @@ function renderPreviewLines(lines: string[]): React.ReactNode[] {
 
 // memo evita re-renders innecesarios cuando el parent actualiza estado no relacionado
 const MedicalReportDocument = memo(({ patient, sections, informeId, qrDataUrl, notaClinica }: DocProps) => {
-  const hallazgos = getPatientFindings(sections);
+  // PERF-H4: memoize expensive derivations — sections is stable (parent memoizes before passing)
+  const hallazgos = useMemo(() => getPatientFindings(sections), [sections]);
   const shortId = informeId.length > 12 ? informeId.substring(0, 12).toUpperCase() : informeId.toUpperCase();
   const fechaExFmtPreview = formatMedicalDate(patient.fechaExamen || '');
   const now = new Date();
@@ -1401,7 +1405,8 @@ const MedicalReportDocument = memo(({ patient, sections, informeId, qrDataUrl, n
 
   // ── T-6.1: dynamic section list — skip HALLAZGOS + INDICACION (rendered separately) ─
   const SKIP_PREVIEW = new Set(['HALLAZGOS', 'INDICACION CLINICA', 'INDICACIÓN CLÍNICA']);
-  const dynamicSections = sections.filter(sec => {
+  // PERF-H4: memoize filtered section list — avoids re-filtering on every keystroke in parent
+  const dynamicSections = useMemo(() => sections.filter(sec => {
     const n = normalizeForHeader(sec.title);
     if (SKIP_PREVIEW.has(n)) return false;
     // Skip internal/methodological sections (SKIP_SECTIONS)
@@ -1409,7 +1414,9 @@ const MedicalReportDocument = memo(({ patient, sections, informeId, qrDataUrl, n
     if (CLEAN_FILTER.some(f => normalizeTitle(sec.title).includes(normalizeTitle(f)))) return false;
     const lines = sec.lines.map(l => stripMarkdown(stripAILanguage(l.trim()))).filter(Boolean);
     return lines.length > 0;
-  });
+    // SKIP_PREVIEW, SKIP_SECTIONS and CLEAN_FILTER are module-level constants — they never
+    // change, so including them in the deps array would only add noise without any benefit.
+  }), [sections]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div
@@ -1590,13 +1597,21 @@ const MedicalReportDocument = memo(({ patient, sections, informeId, qrDataUrl, n
 
 // ── ScaledPreview — definida FUERA del componente para evitar re-montaje ──────
 // Bug anterior: estaba dentro del render → nueva referencia en cada re-render → React desmontaba/remontaba el componente → parpadeo
-const ScaledPreview = memo(({ sec, pid, qr, pat, nota }: { sec: ReportSection[]; pid: string; qr: string; pat: PatientInfo; nota?: string }) => (
-  <div style={{ overflow:'hidden', border:'1px solid #1e3a5f', borderRadius:'6px', backgroundColor:'#fff', height:'540px', position:'relative' }}>
-    <div style={{ transform:'scale(0.56)', transformOrigin:'top left', width:'179%', pointerEvents:'none' }}>
-      <MedicalReportDocument patient={pat} sections={sec} informeId={pid} qrDataUrl={qr} notaClinica={nota} />
+const PDF_WIDTH = 794; // A4 width in px
+const ScaledPreview = memo(({ sec, pid, qr, pat, nota, containerWidth }: { sec: ReportSection[]; pid: string; qr: string; pat: PatientInfo; nota?: string; containerWidth?: number }) => {
+  const availableWidth = (containerWidth || 400) - 32; // 16px padding each side
+  const scale = Math.min(0.56, availableWidth / PDF_WIDTH);
+  const scaledHeight = Math.round(1123 * scale); // A4 height
+  const inverseScale = scale > 0 ? 1 / scale : 1;
+  const inversePercent = Math.round(inverseScale * 100) + '%';
+  return (
+    <div style={{ overflow:'hidden', border:'1px solid #1e3a5f', borderRadius:'6px', backgroundColor:'#fff', height: scaledHeight + 'px', position:'relative' }}>
+      <div style={{ transform:'scale(' + scale + ')', transformOrigin:'top left', width: inversePercent, pointerEvents:'none' }}>
+        <MedicalReportDocument patient={pat} sections={sec} informeId={pid} qrDataUrl={qr} notaClinica={nota} />
+      </div>
     </div>
-  </div>
-));
+  );
+});
 
 // ── SectionEditor — editor estructurado por secciones ─────────────────────────
 // UI profesional: cada sección del informe tiene su propio campo de edición
@@ -1993,6 +2008,37 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     }
   }, []);
 
+  // ── PERF-H6: Abort controller ref (cancels in-flight fetch on unmount) ───
+  const abortRef = useRef<AbortController | null>(null);
+  // Stores milestone setTimeout IDs so they can be cleared on unmount
+  const milestoneTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  // ── RESP-C5: Panel width tracking for responsive ScaledPreview ───────────
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelWidth, setPanelWidth] = useState(400);
+
+  // Cleanup: abort any in-flight analysis fetch and clear milestone timers
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      milestoneTimersRef.current.forEach(id => clearTimeout(id));
+      milestoneTimersRef.current = [];
+    };
+  }, []);
+
+  // ── RESP-C5: Track panel container width for responsive PDF preview ───────
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    setPanelWidth(el.clientWidth || 400);
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width;
+      if (w && w > 0) setPanelWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // ── OHIF context ───────────────────────────────────────────────────────────
   const activeDisplaySets = useActiveViewportDisplaySets();
 
@@ -2088,12 +2134,14 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     }
   }, [authUser, fetchHistorialFromBackend]);
 
-  // Recargar al cambiar a la pestaña Historial (para ver informes recientes)
+  // Recargar al cambiar a la pestaña Historial (para ver informes recientes).
+  // fetchHistorialFromBackend is stable (useCallback with [] deps), so including it
+  // here satisfies exhaustive-deps without causing extra re-renders.
   useEffect(() => {
     if (activeTab === 'historial' && authUser) {
       fetchHistorialFromBackend();
     }
-  }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeTab, authUser, fetchHistorialFromBackend]);
 
   // ── Extract patient info from OHIF active display set ───────────────────
   const [patient, setPatient] = useState<PatientInfo>({
@@ -2203,11 +2251,19 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     // 70% report draft, 85% audit, 100% done (set on response).
     setProgress(10);
     setProgressMsg('Solicitud enviada...');
+    // PERF-H6: store timer IDs in ref so cleanup useEffect can clear them on unmount
     const _t30 = setTimeout(() => { setProgress(30); setProgressMsg('Control de calidad...'); }, 3000);
     const _t50 = setTimeout(() => { setProgress(50); setProgressMsg('Analizando imagenes...'); }, 7000);
     const _t70 = setTimeout(() => { setProgress(70); setProgressMsg('Generando informe...'); }, 18000);
     const _t85 = setTimeout(() => { setProgress(85); setProgressMsg('Auditoria clinica...'); }, 30000);
-    const _clearMilestones = () => { clearTimeout(_t30); clearTimeout(_t50); clearTimeout(_t70); clearTimeout(_t85); };
+    milestoneTimersRef.current = [_t30, _t50, _t70, _t85];
+    const _clearMilestones = () => {
+      clearTimeout(_t30); clearTimeout(_t50); clearTimeout(_t70); clearTimeout(_t85);
+      milestoneTimersRef.current = [];
+    };
+
+    // PERF-H6: create fresh AbortController for this analysis request
+    abortRef.current = new AbortController();
 
     try {
       const response = await generarInforme(
@@ -2461,14 +2517,24 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
   }, []);
 
   // ── Renders ────────────────────────────────────────────────────────────────
-  const tieneTarjeta = metodoPago?.tiene_tarjeta || creditos?.tiene_tarjeta || false;
-  const creditosDisponibles = creditos?.creditos_disponibles ?? 0;
-  // NUEVA LÓGICA: Créditos tienen prioridad sobre tarjeta
-  // Usuario solo necesita tarjeta si NO tiene créditos
-  const usaraCreditos = creditosDisponibles > 0;
-  const usaraTarjeta = !usaraCreditos && tieneTarjeta;
-  const sinMetodoPago = !usaraCreditos && !tieneTarjeta;
-  const canAnalyze = apiStatus === 'online' && !!studyUID && !sinMetodoPago;
+  // PERF-H4: memoize payment/credit derived values — these are used in multiple
+  // render helpers and re-computed on every render without memoization.
+  const { tieneTarjeta, creditosDisponibles, usaraCreditos, usaraTarjeta, sinMetodoPago, canAnalyze } = useMemo(() => {
+    const _tieneTarjeta = metodoPago?.tiene_tarjeta || creditos?.tiene_tarjeta || false;
+    const _creditosDisponibles = creditos?.creditos_disponibles ?? 0;
+    const _usaraCreditos = _creditosDisponibles > 0;
+    const _usaraTarjeta = !_usaraCreditos && _tieneTarjeta;
+    const _sinMetodoPago = !_usaraCreditos && !_tieneTarjeta;
+    const _canAnalyze = apiStatus === 'online' && !!studyUID && !_sinMetodoPago;
+    return {
+      tieneTarjeta: _tieneTarjeta,
+      creditosDisponibles: _creditosDisponibles,
+      usaraCreditos: _usaraCreditos,
+      usaraTarjeta: _usaraTarjeta,
+      sinMetodoPago: _sinMetodoPago,
+      canAnalyze: _canAnalyze,
+    };
+  }, [metodoPago, creditos, apiStatus, studyUID]);
 
   const renderIdle = () => (
     <div style={{ display:'flex', flexDirection:'column', gap:'0', padding:'0' }}>
@@ -2973,7 +3039,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
             onCancel={() => setEditingReport(false)}
           />
         ) : (
-          <ScaledPreview sec={sections} pid={informeId} qr={qrDataUrl} pat={patient} nota={notaClinica} />
+          <ScaledPreview sec={sections} pid={informeId} qr={qrDataUrl} pat={patient} nota={notaClinica} containerWidth={panelWidth} />
         )}
 
         {/* Action buttons — prominent and clear */}
@@ -3046,7 +3112,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       </div>
 
       <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:'10px' }}>
-        <ScaledPreview sec={sections} pid={informeId} qr={qrDataUrl} pat={patient} nota={notaClinica} />
+        <ScaledPreview sec={sections} pid={informeId} qr={qrDataUrl} pat={patient} nota={notaClinica} containerWidth={panelWidth} />
         {pdfError && <div style={{ color:'#f87171', fontSize:'11px', background:'#450a0a', borderRadius:'4px', padding:'8px 10px' }}>{pdfError}</div>}
         {!pdfUrl ? (
           <button onClick={handleGeneratePdf} disabled={isGeneratingPdf}
@@ -3183,7 +3249,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
   }
 
   return (
-    <div style={{ height:'100%', overflowY:'auto', background:'#0a0f1a', color:'#e2e8f0' }}>
+    <div ref={panelRef} style={{ height:'100%', overflowY:'auto', background:'#0a0f1a', color:'#e2e8f0' }}>
       {/* Header */}
       <div style={{ background:'linear-gradient(135deg,#0d1b2a,#1a2744)', padding:'10px 16px',
         borderBottom:'1px solid #1e3a5f', display:'flex', alignItems:'center', gap:'10px',

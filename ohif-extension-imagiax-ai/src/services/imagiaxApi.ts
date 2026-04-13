@@ -337,12 +337,19 @@ export async function getInformesPorEstudio(
 }
 
 /**
+/**
  * List all reports, optionally filtered by estado.
+ * @param estado - optional status filter
+ * @param limit  - max results to return (default 50 to avoid fetching thousands of records)
  */
 export async function listadoInformes(
-  estado?: string
+  estado?: string,
+  limit = 50
 ): Promise<{ total: number; filtro_estado: string | null; items: InformeDB[] }> {
-  const query = estado ? `?estado=${encodeURIComponent(estado)}` : '';
+  const params = new URLSearchParams();
+  if (estado) params.set('estado', estado);
+  params.set('limit', String(limit));
+  const query = params.toString() ? `?${params.toString()}` : '';
   return apiRequest(`/informes/listado${query}`);
 }
 

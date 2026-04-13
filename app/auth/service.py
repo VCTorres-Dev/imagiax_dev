@@ -89,8 +89,15 @@ def create_access_token(
     *,
     expire_hours: float | None = None,
     fingerprint: str | None = None,
+    remember: bool = False,
 ) -> str:
-    """Create a signed JWT with user payload. Includes 'iat' for sliding-window renewal."""
+    """Create a signed JWT with user payload. Includes 'iat' for sliding-window renewal.
+
+    Args:
+        remember: Whether this is a "remember me" session. Stored as a boolean claim
+                  in the JWT payload so that sliding-window renewal (see dependencies.py)
+                  can preserve the original session type without extending it.
+    """
     jwt_secret = settings.JWT_SECRET.get_secret_value()
     hours = float(settings.JWT_EXPIRE_HOURS if expire_hours is None else expire_hours)
     now = datetime.now(timezone.utc)
@@ -103,6 +110,9 @@ def create_access_token(
         "iat": now,
         "exp": expire,
         "jti": uuid.uuid4().hex,
+        # SEC-H03: Store session type so sliding-window renewal preserves it.
+        # Old JWTs without this claim default to False (non-remember) on renewal.
+        "remember": remember,
     }
     if fingerprint:
         payload["fp"] = fingerprint
@@ -163,7 +173,13 @@ def _decode_raw_payload(token: str) -> dict[str, Any]:
     Decode and validate a JWT, returning the raw payload dict.
     Raises HTTPException 401 if the token is invalid or expired.
     Internal helper — use decode_token() for typed UserPayload.
+
+    LOW-4 backward compat: tokens issued before iss/aud claims were enabled
+    will trigger InvalidIssuerError / InvalidAudienceError. These are treated
+    as expired so the user is prompted to re-login rather than seeing a crash.
     """
+    from jwt.exceptions import InvalidAudienceError, InvalidIssuerError
+
     jwt_secret = settings.JWT_SECRET.get_secret_value()
     decode_kwargs: dict = {
         "algorithms": ["HS256"],
@@ -179,6 +195,13 @@ def _decode_raw_payload(token: str) -> dict[str, Any]:
         decode_kwargs["audience"] = settings.jwt_audience
     try:
         return _jwt.decode(token, jwt_secret, **decode_kwargs)
+    except (InvalidIssuerError, InvalidAudienceError):
+        # OLD token issued before iss/aud claims were enforced.
+        # Force re-login — do NOT crash. Treat as expired session.
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión expirada. Por favor iniciá sesión nuevamente.",
+        )
     except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido o expirado")
 
@@ -193,6 +216,8 @@ def decode_token(token: str) -> UserPayload:
         rol=payload["rol"],
         jti=payload.get("jti"),
         fp=payload.get("fp"),
+        # SEC-H03: Default False for old JWTs that don't have this claim.
+        remember=bool(payload.get("remember", False)),
     )
 
 
@@ -213,6 +238,8 @@ def decode_token_with_renewal_check(token: str) -> tuple[UserPayload, bool]:
         rol=payload["rol"],
         jti=payload.get("jti"),
         fp=payload.get("fp"),
+        # SEC-H03: Default False for old JWTs that don't have this claim.
+        remember=bool(payload.get("remember", False)),
     )
     return user, should_renew_token(payload)
 
@@ -224,7 +251,14 @@ def verify_session_cookie_token(token: str | None) -> bool:
     - exp required and valid
     - nbf valid when present
     - iss/aud only if configured in env
+
+    LOW-4 backward compat: old tokens without iss/aud return False (force re-login)
+    rather than crashing. Both InvalidIssuerError and InvalidAudienceError are
+    subclasses of JWTError so the existing except already handles them — but we
+    catch them explicitly first to return False (not crash) with a clear path.
     """
+    from jwt.exceptions import InvalidAudienceError, InvalidIssuerError
+
     if not token:
         return False
     jwt_secret = settings.JWT_SECRET.get_secret_value()
@@ -243,6 +277,9 @@ def verify_session_cookie_token(token: str | None) -> bool:
             audience=settings.jwt_audience,
         )
         return True
+    except (InvalidIssuerError, InvalidAudienceError):
+        # LOW-4: old token without iss/aud — force re-login, don't crash
+        return False
     except JWTError:
         return False
 
@@ -762,11 +799,16 @@ async def upsert_bootstrap_superadmin_from_env(pool: asyncpg.Pool) -> None:
     Resolves the case: another superadmin already existed and the env email was never inserted,
     so login with the documented credentials failed.
 
-    In production (APP_ENV=production) this is not called from the API to avoid overwriting
-    rotated passwords. Disable in local: IMAGIAX_ADMIN_UPSERT_FROM_ENV=0
+    SEC-M02: Only runs when APP_ENV is explicitly "development".
+    Running this in staging/production risks overwriting rotated credentials
+    with the values from .env (which may be the default or an old password).
+    Set IMAGIAX_ADMIN_UPSERT_FROM_ENV=0 to disable even in development.
     """
-    if os.getenv("APP_ENV", "development").strip().lower() == "production":
-        return
+    # SEC-M02: Guard — only bootstrap in explicit development mode.
+    # "not production" was too broad: staging, testing, review envs should
+    # never auto-overwrite credentials from environment variables.
+    if os.getenv("APP_ENV", "development").strip().lower() != "development":
+        return  # Only bootstrap in explicit development mode
     if os.getenv("IMAGIAX_ADMIN_UPSERT_FROM_ENV", "1").strip().lower() in ("0", "false", "no"):
         return
 

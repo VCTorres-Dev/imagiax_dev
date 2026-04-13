@@ -29,6 +29,15 @@ from typing import Any
 
 import asyncpg
 import httpx
+
+# torch is installed separately in the Dockerfile (CPU wheel via --index-url).
+# Guard with try/except so the module can be imported in environments without
+# torch (e.g. CI or dev containers that skip the heavy ML dependencies).
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None  # type: ignore[assignment]
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -65,6 +74,7 @@ from app.ai.prompt_orchestrator import (
 )
 # ── v1.1 imports (ai-pipeline-v1.1) ─────────────────────────────────────────
 from app.ai.auditor import run_audit, should_audit
+from app.ai.constants import NOMBRES_ES
 from app.ai.pipeline_context import PipelineContext, QualityGateResult
 from app.ai.quality_gate import run_quality_gate
 from app.auth.dependencies import get_current_user
@@ -342,6 +352,11 @@ async def _analyze_from_bytes(
 
     return {
         "orthanc_instance_id": oid,
+        # PERF-C2: Cache raw bytes so generar_informe can pass them to Gemini
+        # Vision without re-downloading from Orthanc.  Prefixed with '_' to
+        # signal this is an internal pipeline field — not part of the public
+        # API response (JSONResponse serialization strips unknown keys).
+        "_raw_dicom_bytes": dicom_bytes,
         "dicom": {
             "StudyInstanceUID": tags.get("StudyInstanceUID"),
             "SeriesInstanceUID": tags.get("SeriesInstanceUID"),
@@ -380,7 +395,6 @@ async def analizar_instancia(
 ) -> JSONResponse:
     orthanc = _get_orthanc_client(request)
     model = _get_model(request)
-    import torch
     device = getattr(request.app.state, "device", torch.device("cpu"))
 
     if body.orthanc_instance_id:
@@ -408,7 +422,6 @@ async def analizar_serie(
 ) -> JSONResponse:
     orthanc = _get_orthanc_client(request)
     model = _get_model(request)
-    import torch
     device = getattr(request.app.state, "device", torch.device("cpu"))
 
     instance_ids = await find_instances_by_query(
@@ -460,7 +473,6 @@ async def analizar_estudio(
 ) -> JSONResponse:
     orthanc = _get_orthanc_client(request)
     model = _get_model(request)
-    import torch
     device = getattr(request.app.state, "device", torch.device("cpu"))
 
     instance_ids = await find_instances_by_query(
@@ -683,7 +695,6 @@ async def _run_ai_analysis(
     """
     orthanc = _get_orthanc_client(request)
     model = _get_model(request)
-    import torch
     device = getattr(request.app.state, "device", torch.device("cpu"))
 
     # ML gate: peek at first instance to decide whether to run ResNet50
@@ -907,31 +918,9 @@ async def _build_template_context(
         h for h in study_findings if h.get("probabilidad_pct_max", 0) >= 50
     ]
 
-    _NOMBRES_ES_LOCAL: dict[str, str] = {
-        "Atelectasis": "Atelectasia",
-        "Cardiomegaly": "Cardiomegalia",
-        "Effusion": "Derrame pleural",
-        "Infiltrate": "Infiltrado pulmonar",
-        "Infiltration": "Infiltrado pulmonar",
-        "Mass": "Masa pulmonar",
-        "Nodule": "Nódulo pulmonar",
-        "Pneumonia": "Neumonía",
-        "Pneumothorax": "Neumotórax",
-        "Consolidation": "Consolidación pulmonar",
-        "Edema": "Edema pulmonar",
-        "Emphysema": "Enfisema pulmonar",
-        "Fibrosis": "Fibrosis pulmonar",
-        "Pleural_Thickening": "Engrosamiento pleural",
-        "Hernia": "Hernia diafragmática",
-        "Lung Lesion": "Lesión pulmonar",
-        "Fracture": "Fractura",
-        "Lung Opacity": "Opacidad pulmonar",
-        "Enlarged Cardiomediastinum": "Ensanchamiento mediastínico",
-    }
-
     if _hallazgos_positivos_r:
         _hallazgos_confirmados_r = "\n".join(
-            f"  - {_NOMBRES_ES_LOCAL.get(h['patologia'], h['patologia'])} (CONFIRMADO — hallazgo principal)"
+            f"  - {NOMBRES_ES.get(h['patologia'], h['patologia'])} (CONFIRMADO — hallazgo principal)"
             for h in _hallazgos_positivos_r
         )
     else:
@@ -1284,12 +1273,19 @@ async def generar_informe(
         logger.info("[GEMINI] Sending all %d analyzed images to Gemini", len(ordered_for_gemini))
     dicom_images: list[bytes] = []
     for inst in ordered_for_gemini:
-        try:
-            dicom_images.append(
-                await get_instance_dicom_bytes(orthanc, inst["orthanc_instance_id"])
-            )
-        except Exception:
-            pass
+        # PERF-C2: Reuse raw bytes cached by _analyze_from_bytes (ResNet50 path).
+        # If _raw_dicom_bytes is absent (tags-only path B, or future callers that
+        # don't go through _analyze_from_bytes), fall back to a fresh download.
+        cached = inst.get("_raw_dicom_bytes")
+        if cached is not None:
+            dicom_images.append(cached)
+        else:
+            try:
+                dicom_images.append(
+                    await get_instance_dicom_bytes(orthanc, inst["orthanc_instance_id"])
+                )
+            except Exception:
+                pass
 
     # ── VFY-001: v1.1 Global {timeout}s Timeout ──────────────────────────────
     # Wrap entire v1.1 pipeline (quality gate + generation + auditor) in global

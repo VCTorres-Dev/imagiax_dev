@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     # "Remember me" session lifetime (panel admin)
     JWT_REMEMBER_HOURS: int = 48
     # Optional issuer/audience claims — empty string means omitted from token
-    JWT_ISSUER: str = ""
-    JWT_AUDIENCE: str = ""
+    JWT_ISSUER: str = "imagiax.dev"
+    JWT_AUDIENCE: str = "imagiax-api"
 
     # ── Orthanc PACS ─────────────────────────────────────────────────────────
     ORTHANC_BASE_URL: str = "http://localhost:8042"
@@ -82,8 +82,10 @@ class Settings(BaseSettings):
     PIPELINE_VERSION: str = "1.1"
     # Gemini Pro model for selective auditor
     GEMINI_PRO_MODEL: str = "gemini-2.5-pro"
-    # Global hard deadline for the entire v1.1 pipeline (seconds)
-    PIPELINE_GLOBAL_TIMEOUT: int = 180
+    # Global hard deadline for the entire v1.1 pipeline (seconds).
+    # Must be > Gemini worst-case: 4 attempts × 60 s + 35 s backoff = 275 s.
+    # Set to 300 s to give a 25 s buffer above the Gemini retry worst case.
+    PIPELINE_GLOBAL_TIMEOUT: int = 300
     # Per-phase timeouts (seconds)
     QUALITY_GATE_TIMEOUT: int = 10
     AUDITOR_TIMEOUT: int = 20

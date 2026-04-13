@@ -111,25 +111,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         import base64 as _b64
         _creds = f"{settings.ORTHANC_USER}:{settings.ORTHANC_PASSWORD.get_secret_value()}"
         _orthanc_headers["Authorization"] = "Basic " + _b64.b64encode(_creds.encode()).decode()
+    # One shared client — pacs is an alias for backward compat
     app.state.orthanc = _httpx.AsyncClient(
         base_url=settings.ORTHANC_BASE_URL,
         headers=_orthanc_headers,
         timeout=_tbk_timeout,
     )
-    app.state.pacs = _httpx.AsyncClient(
-        base_url=settings.ORTHANC_BASE_URL,
-        headers=_orthanc_headers,
-        timeout=_tbk_timeout,
-    )
-    logger.info("IMAGIAX AI: Orthanc + PACS clients ready.")
+    app.state.pacs = app.state.orthanc  # alias — same client, same connection pool
+    logger.info("IMAGIAX AI: Orthanc client ready (pacs aliased to orthanc).")
 
     yield
 
     # -- Shutdown -------------------------------------------------------------
     if getattr(app.state, "orthanc", None):
         await app.state.orthanc.aclose()
-    if getattr(app.state, "pacs", None):
-        await app.state.pacs.aclose()
+    # app.state.pacs is an alias to app.state.orthanc — already closed above
     await app.state.pool.close()
     logger.info("IMAGIAX: PostgreSQL pool closed.")
 

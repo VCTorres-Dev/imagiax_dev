@@ -321,8 +321,24 @@ async def estado_oneclick(
 
 @router.get("/inscribir", response_class=HTMLResponse)
 async def inscribir_page():
-    """Página para inscribir tarjeta Oneclick."""
-    return HTMLResponse(_INSCRIPCION_HTML)
+    """Página para inscribir tarjeta Oneclick.
+
+    SEC-H01: El bloque de tarjeta de prueba solo se muestra fuera de producción.
+    En producción se muestra un mensaje genérico para no exponer datos de testing.
+    """
+    # SEC-H01: Conditionally render test card info based on environment.
+    # Using str.replace() with a unique placeholder to avoid conflicts with
+    # the many { } in the embedded JavaScript of _INSCRIPCION_HTML.
+    if settings.is_production:
+        test_card_html = '<p class="desc" style="color:var(--muted); font-size:0.8rem;">Ingresa los datos de tu tarjeta.</p>'
+    else:
+        test_card_html = (
+            '<div class="info">'
+            "<strong>Ambiente de pruebas:</strong> Usa la tarjeta VISA <code>4051 8856 0044 6623</code>, "
+            "CVV <code>123</code>, cualquier fecha de expiracion. RUT: <code>11.111.111-1</code>, clave: <code>123</code>."
+            "</div>"
+        )
+    return HTMLResponse(_INSCRIPCION_HTML.replace("__TEST_CARD_PLACEHOLDER__", test_card_html))
 
 
 _INSCRIPCION_HTML = """<!DOCTYPE html>
@@ -360,10 +376,7 @@ _INSCRIPCION_HTML = """<!DOCTYPE html>
     Al inscribir tu tarjeta, autorizas cobros automaticos de <strong>$990 CLP</strong>
     por cada informe radiologico generado. Puedes desvincular tu tarjeta en cualquier momento.
   </p>
-  <div class="info">
-    <strong>Ambiente de pruebas:</strong> Usa la tarjeta VISA <code>4051 8856 0044 6623</code>,
-    CVV <code>123</code>, cualquier fecha de expiracion. RUT: <code>11.111.111-1</code>, clave: <code>123</code>.
-  </div>
+  __TEST_CARD_PLACEHOLDER__
   <form id="form">
     <label>Email</label>
     <input type="email" id="email" placeholder="doctor@clinica.cl" required />

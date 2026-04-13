@@ -396,8 +396,16 @@ async def get_todos_informes(
     usuario_id: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    cursor_id: str | None = None,
 ) -> dict:
     """Retorna informes paginados con filtros opcionales.
+
+    Supports two pagination modes:
+    - OFFSET-based (default): use ``offset`` parameter. Simpler; used by the
+      admin SPA for page-number navigation. Slower for deep pages (O(offset)).
+    - Cursor-based: pass ``cursor_id`` (UUID string of the last seen informe).
+      Faster for deep pages — uses a keyset filter instead of OFFSET.
+      Preferred for API consumers that do infinite scroll / load-more.
 
     P4-FIX: Uses COUNT(*) OVER() window function to get total in the same query
     instead of a separate COUNT query (2 round-trips → 1).
@@ -405,36 +413,75 @@ async def get_todos_informes(
     """
     limit = min(limit, 500)
     _uid = uuid.UUID(usuario_id) if usuario_id else None
+
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, study_instance_uid, patient_id, patient_name, study_date, modalidad,
-                   ai_nivel_alerta, ai_hallazgos, ai_todas_patologias, informe_generado, informe_final,
-                   modelo_llm, estado, fue_editado, notas_rechazo, usuario_id, usuario_email,
-                   cobro_estado, cobro_metodo, cobro_monto_clp, cobro_ref_id,
-                   timestamp_decision, created_at, created_at AS timestamp_creacion, patient_age,
-                   nota_clinica, short_id,
-                   COUNT(*) OVER() AS _total_count
-            FROM informes
-            WHERE ($1::text IS NULL OR estado = $1)
-              AND ($2::uuid IS NULL OR usuario_id = $2)
-            ORDER BY created_at DESC
-            LIMIT $3 OFFSET $4
-            """,
-            estado,
-            _uid,
-            limit,
-            offset,
-        )
-    total = rows[0]["_total_count"] if rows else 0
-    items = [{k: v for k, v in _row_to_dict(r).items() if k != "_total_count"} for r in rows]
-    return {
-        "items": items,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "has_more": (offset + len(items)) < total,
-    }
+        if cursor_id is not None:
+            # Cursor-based: faster for deep pages — no OFFSET scan.
+            # Returns up to ``limit`` rows with id < cursor_id (keyset pagination).
+            # NOTE: total_count is always 0 in cursor mode — callers must use has_more.
+            _cursor_uuid = uuid.UUID(cursor_id)
+            rows = await conn.fetch(
+                """
+                SELECT id, study_instance_uid, patient_id, patient_name, study_date, modalidad,
+                       ai_nivel_alerta, ai_hallazgos, ai_todas_patologias, informe_generado, informe_final,
+                       modelo_llm, estado, fue_editado, notas_rechazo, usuario_id, usuario_email,
+                       cobro_estado, cobro_metodo, cobro_monto_clp, cobro_ref_id,
+                       timestamp_decision, created_at, created_at AS timestamp_creacion, patient_age,
+                       nota_clinica, short_id
+                FROM informes
+                WHERE ($1::text IS NULL OR estado = $1)
+                  AND ($2::uuid IS NULL OR usuario_id = $2)
+                  AND id < $3
+                ORDER BY created_at DESC, id DESC
+                LIMIT $4
+                """,
+                estado,
+                _uid,
+                _cursor_uuid,
+                limit,
+            )
+            items = [_row_to_dict(r) for r in rows]
+            next_cursor = str(rows[-1]["id"]) if len(rows) == limit else None
+            return {
+                "items": items,
+                "total": 0,  # not computed in cursor mode
+                "limit": limit,
+                "offset": None,
+                "has_more": next_cursor is not None,
+                "next_cursor": next_cursor,
+            }
+        else:
+            # Offset-based: used by admin SPA for page-number navigation.
+            rows = await conn.fetch(
+                """
+                SELECT id, study_instance_uid, patient_id, patient_name, study_date, modalidad,
+                       ai_nivel_alerta, ai_hallazgos, ai_todas_patologias, informe_generado, informe_final,
+                       modelo_llm, estado, fue_editado, notas_rechazo, usuario_id, usuario_email,
+                       cobro_estado, cobro_metodo, cobro_monto_clp, cobro_ref_id,
+                       timestamp_decision, created_at, created_at AS timestamp_creacion, patient_age,
+                       nota_clinica, short_id,
+                       COUNT(*) OVER() AS _total_count
+                FROM informes
+                WHERE ($1::text IS NULL OR estado = $1)
+                  AND ($2::uuid IS NULL OR usuario_id = $2)
+                ORDER BY created_at DESC
+                LIMIT $3 OFFSET $4
+                """,
+                estado,
+                _uid,
+                limit,
+                offset,
+            )
+        total = rows[0]["_total_count"] if rows else 0
+        items = [{k: v for k, v in _row_to_dict(r).items() if k != "_total_count"} for r in rows]
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(items)) < total,
+            "next_cursor": None,
+        }
 
 
 async def get_study_by_short_id(

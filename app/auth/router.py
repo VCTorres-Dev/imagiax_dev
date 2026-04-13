@@ -134,6 +134,8 @@ async def auth_login(body: LoginRequest, request: Request) -> JSONResponse:
         rol=user["rol"],
         expire_hours=expire_hours,
         fingerprint=session_fp,
+        # SEC-H03: Store the session type so sliding-window renewal preserves it.
+        remember=body.remember,
     )
 
     # 5b) Clear failed attempts on successful login — C-003
