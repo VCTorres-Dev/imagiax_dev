@@ -13,7 +13,7 @@
 | `MP_WEBHOOK_SECRET` | Secreto real de MercadoPago (no vacío) | SEC-PAY-001 |
 | `ORTHANC_PASSWORD` | Contraseña PACS actual (no valor default) | SEC-INFRA-001 |
 | `ORTHANC_AUTH_HEADER` | `Basic <base64(imagiax:<ORTHANC_PASSWORD>)>` | SEC-INFRA-001 |
-| `JWT_SECRET_KEY` | ≥32 chars, generado con `openssl rand -hex 32` | SEC-INFRA-002 |
+| `JWT_SECRET` | ≥32 chars, generado con `openssl rand -hex 32` | SEC-INFRA-002 |
 | `GEMINI_API_KEY` | Clave activa de Google AI Studio | SEC-INFRA-003 |
 | `DATABASE_URL` | Apunta a DB de producción | — |
 
@@ -31,7 +31,7 @@ echo -n "imagiax:<ORTHANC_PASSWORD>" | base64
 
 - [ ] Verificar que `APP_ENV=production` y `IMAGIAX_PAYMENT_MODE=production` están seteadas
 - [ ] Confirmar que `MP_WEBHOOK_SECRET` no está vacío (el servidor rechazará webhooks si está vacío)
-- [ ] Confirmar que `JWT_SECRET_KEY` fue rotada en los últimos 90 días
+- [ ] Confirmar que `JWT_SECRET` fue rotada en los últimos 90 días
 - [ ] Confirmar que `ORTHANC_PASSWORD` no es el valor default (`imagiax2024`)
 - [ ] Confirmar que `GEMINI_API_KEY` es válida y tiene cuota suficiente
 
@@ -87,12 +87,12 @@ proxy_set_header Host $host;
 
 | Secreto | Frecuencia | Responsable |
 |---------|-----------|-------------|
-| `JWT_SECRET_KEY` | Cada 90 días o ante sospecha de compromiso | DevOps |
+| `JWT_SECRET` | Cada 90 días o ante sospecha de compromiso | DevOps |
 | `ORTHANC_PASSWORD` | Cada 180 días | DevOps |
 | `GEMINI_API_KEY` | Ante sospecha de leak (revisar GCP logs) | Dev Lead |
 | `MP_WEBHOOK_SECRET` | Ante cambio de cuenta MP o sospecha de leak | Dev Lead |
 
-**Procedimiento de rotación de JWT_SECRET_KEY:**
+**Procedimiento de rotación de JWT_SECRET:**
 1. Generar nueva clave: `openssl rand -hex 32`
 2. Actualizar `.env.production` y reiniciar servicio
 3. **Todos los usuarios activos serán deslogueados** (tokens anteriores invalidados)

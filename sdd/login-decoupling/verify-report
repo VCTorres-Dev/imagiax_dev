@@ -1,0 +1,125 @@
+## Verification Report
+
+**Change**: login-decoupling  
+**Version**: N/A (delta spec in Engram #208)  
+**Mode**: Standard
+
+---
+
+### Completeness
+| Metric | Value |
+|--------|-------|
+| Tasks total | 10 |
+| Tasks complete | 8 |
+| Tasks incomplete | 2 |
+
+Incomplete tasks:
+- [ ] 4.1 Add/adjust server tests for `GET /login`.
+- [ ] 4.2 Add/adjust server tests for `GET /admin` auth matrix.
+
+Assessment: **CRITICAL** (verification tasks for changed behavior are still incomplete).
+
+---
+
+### Build & Tests Execution
+
+**Build / Type-check**: ✅ Passed  
+Command run:
+```bash
+python3 -m py_compile imagiax_admin.py
+```
+Output:
+```text
+(no output)
+exit code: 0
+```
+
+**Tests**: ❌ Not executable in current runtime  
+Command run:
+```bash
+python3 -m pytest -q test_login.py
+```
+Output:
+```text
+/usr/bin/python3: No module named pytest
+exit code: 1
+```
+
+**Runtime HTTP validation**: ❌ Not executable in current runtime  
+Tried requests to `/login` and `/admin` at `http://localhost:8010`, all failed with:
+```text
+<urlopen error [Errno 111] Connection refused>
+```
+
+**Coverage**: ➖ Not available (`pytest`/coverage tooling not present).
+
+---
+
+### Spec Compliance Matrix
+
+| Requirement | Scenario | Test | Result |
+|-------------|----------|------|--------|
+| Serve public login UI at `/login` | Load login page | (none found) | ❌ UNTESTED |
+| Support `returnTo` safely | Valid returnTo | (none found) | ❌ UNTESTED |
+| Support `returnTo` safely | Invalid returnTo is ignored | (none found) | ❌ UNTESTED |
+| Gate `/admin` by role | Admin user gets dashboard | (none found) | ❌ UNTESTED |
+| Gate `/admin` by role | Superadmin user gets dashboard | (none found) | ❌ UNTESTED |
+| Handle unauthenticated and unauthorized access | Unauthenticated redirected to login | (none found) | ❌ UNTESTED |
+| Handle unauthenticated and unauthorized access | Authenticated non-admin denied | (none found) | ❌ UNTESTED |
+| Prevent admin UI leakage to public routes | Login page does not contain dashboard payload | (none found) | ❌ UNTESTED |
+| Split admin HTML safely | Bad split source fails fast | (none found) | ❌ UNTESTED |
+| Frontend auth redirect | App redirect target updated | (none found) | ❌ UNTESTED |
+| Frontend auth redirect | API helper redirect target updated | (none found) | ❌ UNTESTED |
+
+**Compliance summary**: **0/11 scenarios compliant** (no passing behavioral tests available).
+
+---
+
+### Correctness (Static — Structural Evidence)
+
+| Requirement | Status | Notes |
+|------------|--------|-------|
+| `/login` route exists and serves login UI | ✅ Implemented | `@router.get("/login")` returns `_LOGIN_HTML` with no-store headers. |
+| `returnTo` sanitation on `/login` | ✅ Implemented | `_sanitize_return_to` enforces relative-path-only (`/`, rejects `//`, `\\`, `://`). |
+| Preserve `returnTo` in login payload | ✅ Implemented | `window.__LOGIN_RETURN_TO__ = __LOGIN_RETURN_TO__` injected into login JS. |
+| `/admin` protected and redirected when unauthenticated | ✅ Implemented | Missing cookie or token verification error → `RedirectResponse('/login?returnTo=/admin', 303)`. |
+| `/admin` only for admin/superadmin | ⚠️ Partial / deviated from spec | Non-admin authenticated user is redirected to `/login?returnTo=/admin` instead of **403** required by spec. |
+| Prevent admin UI leakage in `/login` | ✅ Implemented (static check) | Derived `_LOGIN_HTML` does not include `id="app"` or `/admin/api/`; derived `_ADMIN_HTML` contains dashboard. |
+| Fail fast if split markers missing | ✅ Implemented | Split code raises `RuntimeError(...)` at import time when markers are absent. |
+| Frontend redirects to `/login` | ✅ Implemented | `App.tsx` and `imagiaxApi.ts` redirect unauthenticated users to `${API_BASE_URL}/login?returnTo=/`. |
+
+---
+
+### Coherence (Design)
+
+| Decision | Followed? | Notes |
+|----------|-----------|-------|
+| Split monolithic HTML into login vs dashboard payloads | ✅ Yes | `_LOGIN_HTML` and `_ADMIN_HTML` are derived from `_ADMIN_HTML_SOURCE` using markers. |
+| Add `/login` and guard `/admin` server-side | ✅ Yes | Implemented in `imagiax_admin.py`. |
+| ReturnTo sanitization must be server-side | ✅ Yes | `_sanitize_return_to` present and used in `/login`. |
+| Unauthorized authenticated non-admin should return 403 | ⚠️ Deviated | Implementation redirects non-admin to login (303), conflicting with spec scenario. |
+| Optional extraction to separate templates/module | ➖ N/A | Not required; kept inline constants. |
+
+---
+
+### Issues Found
+
+**CRITICAL** (must fix before archive):
+1. No behavioral tests executed/passing for any spec scenario (11/11 untested).
+2. Runtime server validation could not be executed (`localhost:8010` connection refused in this environment).
+3. Spec mismatch: authenticated non-admin access to `/admin` should return **403**; current code returns **303 redirect to /login**.
+
+**WARNING** (should fix):
+1. `pytest` is not available in runtime (`No module named pytest`), blocking verification pipeline.
+2. The route guard catches broad `except Exception` in `/admin`; this can mask unexpected server errors as login redirects.
+
+**SUGGESTION** (nice to have):
+1. Add dedicated integration tests with FastAPI TestClient for `/login` and `/admin` matrix exactly as in spec.
+2. Consider explicit exception handling (`HTTPException`/token errors) instead of broad catch in `/admin`.
+
+---
+
+### Verdict
+**FAIL**
+
+Static review confirms most structural changes are present (HTML split, `/login`, `/admin` guard, frontend redirects), but verification **fails** due to missing executable behavioral tests and one direct spec deviation (`non-admin /admin` expected 403, got redirect behavior in code).

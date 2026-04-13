@@ -32,9 +32,9 @@
 
   "RemoteAccessAllowed": true,
   "SslEnabled": false,
-  "AuthenticationEnabled": false,
+  "AuthenticationEnabled": true,
   "RegisteredUsers": {
-    "imagiax": "imagiax2024"
+    "imagiax": "ImagiaxPACS_2026!"
   },
 
   "DicomModalities": {},

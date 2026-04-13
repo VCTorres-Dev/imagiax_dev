@@ -1,0 +1,15 @@
+# =============================================================================
+# IMAGIAX — Telegram Notification Configuration
+# =============================================================================
+# INSTRUCTIONS:
+#   1. Create a Telegram bot via @BotFather (see MONITORING.md for full guide)
+#   2. Replace the placeholder values below with your actual credentials
+#   3. Deploy this file to /root/monitoring/.telegram_config on the server
+#   4. Run: chmod 600 /root/monitoring/.telegram_config
+#
+# WARNING: Never commit this file with real credentials to version control!
+# This file should only exist on the server with restricted permissions (600).
+# =============================================================================
+
+BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+CHAT_ID=YOUR_CHAT_ID_HERE

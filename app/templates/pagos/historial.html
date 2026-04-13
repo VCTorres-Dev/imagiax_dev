@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<title>Historial de cobros &mdash; IMAGIAX</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{--bg:#060b18;--surface:#0c1222;--surface2:#111827;--border:#1e293b;
+        --text:#f1f5f9;--muted:#64748b;--blue:#3b82f6;--green:#22c55e}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+       background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+
+  /* Ambient glow */
+  body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;
+    background:radial-gradient(ellipse 900px 500px at 50% -80px,rgba(59,130,246,.07),transparent);
+    pointer-events:none;z-index:0}
+
+  /* Sticky header */
+  .topbar{position:sticky;top:0;z-index:100;
+    background:rgba(6,11,24,.85);backdrop-filter:blur(16px) saturate(1.4);
+    -webkit-backdrop-filter:blur(16px) saturate(1.4);
+    border-bottom:1px solid rgba(30,41,59,.6);
+    padding:0 28px;height:60px;display:flex;align-items:center;gap:14px}
+  .topbar-logo{width:34px;height:34px;border-radius:9px;
+    background:linear-gradient(135deg,#1e40af,#6d28d9);
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:13px;color:#fff;letter-spacing:-.5px;
+    box-shadow:0 0 20px rgba(59,130,246,.3);flex-shrink:0}
+  .topbar-name{font-size:16px;font-weight:700;letter-spacing:-.3px}
+  .topbar-sub{font-size:10px;color:var(--muted);letter-spacing:.2px;margin-top:1px}
+  .topbar-actions{margin-left:auto;display:flex;gap:8px;align-items:center}
+  .btn-sm{color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;
+    padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:transparent;
+    cursor:pointer;transition:all .2s;font-family:inherit}
+  .btn-sm:hover{border-color:#334155;color:var(--text);background:var(--surface)}
+
+  /* Export button group */
+  .export-group{display:flex;align-items:center;gap:6px}
+  .export-label{font-size:11px;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.7px;font-weight:600;margin-right:2px;white-space:nowrap}
+  .btn-export{display:inline-flex;align-items:center;gap:6px;
+    font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;
+    border:none;border-radius:8px;padding:7px 13px;
+    transition:background .18s,transform .12s,box-shadow .18s;
+    white-space:nowrap;letter-spacing:.1px}
+  .btn-export:active{transform:scale(.97)}
+  .btn-export-excel{
+    background:rgba(34,197,94,.1);color:#4ade80;
+    border:1px solid rgba(34,197,94,.2)}
+  .btn-export-excel:hover{background:rgba(34,197,94,.18);
+    box-shadow:0 2px 12px rgba(34,197,94,.15);border-color:rgba(34,197,94,.35)}
+  .btn-export-csv{
+    background:rgba(59,130,246,.1);color:#60a5fa;
+    border:1px solid rgba(59,130,246,.2)}
+  .btn-export-csv:hover{background:rgba(59,130,246,.18);
+    box-shadow:0 2px 12px rgba(59,130,246,.15);border-color:rgba(59,130,246,.35)}
+  .btn-export svg{flex-shrink:0;opacity:.85}
+
+  .page{max-width:1040px;margin:0 auto;padding:36px 28px 60px;position:relative;z-index:1}
+
+  /* Page title */
+  .page-title{margin-bottom:28px}
+  .page-title h1{font-size:26px;font-weight:800;letter-spacing:-.5px;
+    background:linear-gradient(135deg,#f1f5f9,#94a3b8);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .page-title p{color:var(--muted);font-size:13px;margin-top:4px}
+
+  /* KPI cards */
+  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}
+  @media(max-width:700px){.kpi-row{grid-template-columns:repeat(2,1fr)}}
+  .kpi{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+       padding:20px 20px 18px;position:relative;overflow:hidden;transition:border-color .2s}
+  .kpi:hover{border-color:#334155}
+  .kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,transparent,var(--kpi-accent,#334155),transparent)}
+  .kpi-1{--kpi-accent:#22c55e}.kpi-2{--kpi-accent:#3b82f6}
+  .kpi-3{--kpi-accent:#4ade80}.kpi-4{--kpi-accent:#fb923c}
+  .kpi-label{font-size:10.5px;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.8px;font-weight:600;margin-bottom:10px}
+  .kpi-value{font-size:28px;font-weight:800;color:var(--text);
+    font-variant-numeric:tabular-nums;letter-spacing:-.8px}
+  .kpi-value.accent{color:#34d399}
+  .kpi-value.warn{color:#fb923c}
+
+  /* Period filters */
+  .filters-row{display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:20px;gap:12px;flex-wrap:wrap}
+  .filters{display:flex;gap:4px;flex-wrap:wrap;padding:3px;
+    background:var(--surface);border:1px solid var(--border);border-radius:10px;width:fit-content}
+  .f-btn{background:transparent;border:none;color:var(--muted);padding:6px 14px;
+    border-radius:7px;cursor:pointer;font-size:12px;font-weight:500;transition:all .2s;
+    letter-spacing:.1px;font-family:inherit}
+  .f-btn:hover{color:var(--text);background:rgba(255,255,255,.04)}
+  .f-btn.active{background:var(--blue);color:#fff;font-weight:600;
+    box-shadow:0 2px 8px rgba(59,130,246,.25)}
+
+  /* Table */
+  .table-wrap{background:var(--surface);border:1px solid var(--border);
+    border-radius:14px;overflow:hidden}
+  .table-header{padding:18px 20px;border-bottom:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-between}
+  .table-title{font-size:14px;font-weight:700}
+  .table-count{font-size:12px;color:var(--muted)}
+  table{width:100%;border-collapse:collapse}
+  thead th{background:#080e1c;text-align:left;padding:12px 16px;font-size:10.5px;
+    color:var(--muted);text-transform:uppercase;letter-spacing:.7px;font-weight:600;
+    border-bottom:1px solid var(--border)}
+  tbody td{padding:14px 16px;border-bottom:1px solid rgba(30,41,59,.5);font-size:13px;
+    vertical-align:middle}
+  tbody tr{transition:background .15s}
+  tbody tr:hover td{background:rgba(30,41,59,.35)}
+  tbody tr:last-child td{border-bottom:none}
+
+  .cell-fecha{color:#94a3b8;font-size:12.5px;white-space:nowrap;font-family:monospace}
+  .cell-desc{color:#cbd5e1;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+  .cell-tipo{color:#94a3b8;font-size:12px}
+  .cell-monto{font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+  .cell-via{font-size:10px;color:var(--muted);text-align:center;font-weight:600;letter-spacing:.4px}
+  .cell-rut{color:#94a3b8;font-size:12px;font-family:monospace}
+
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;
+    font-size:11px;font-weight:600;letter-spacing:.2px}
+  .badge-approved{background:rgba(34,197,94,.1);color:#4ade80;border:1px solid rgba(34,197,94,.18)}
+  .badge-rejected{background:rgba(239,68,68,.1);color:#f87171;border:1px solid rgba(239,68,68,.15)}
+  .badge-pending{background:rgba(251,191,36,.08);color:#fbbf24;border:1px solid rgba(251,191,36,.15)}
+  .badge-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+  .dot-approved{background:#4ade80}.dot-rejected{background:#f87171}.dot-pending{background:#fbbf24}
+
+  .empty-state{text-align:center;padding:56px 20px}
+  .empty-state svg{opacity:.3;margin-bottom:12px}
+  .empty-state-title{font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px}
+  .empty-state p{font-size:13px;color:var(--muted)}
+
+  .page-footer{margin-top:32px;text-align:center;color:#334155;font-size:11px;letter-spacing:.3px}
+
+  @media(max-width:640px){
+    .topbar{padding:0 16px}
+    .page{padding:20px 14px 40px}
+    .page-title h1{font-size:20px}
+    .kpi-value{font-size:22px}
+    tbody td{padding:10px 10px;font-size:12px}
+    .cell-desc{max-width:140px}
+    .filters{overflow-x:auto}
+  }
+</style>
+</head>
+<body>
+{{ test_badge }}
+<!-- Sticky top bar -->
+<header class="topbar">
+  <div class="topbar-logo">IX</div>
+  <div>
+    <div class="topbar-name">IMAGIAX</div>
+    <div class="topbar-sub">Medical AI Platform</div>
+  </div>
+  <div class="topbar-actions">
+    <div class="export-group">
+      <span class="export-label">Exportar</span>
+      <button class="btn-export btn-export-excel" onclick="exportExcel()" title="Exportar a Excel">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+          <polyline points="10 9 9 9 8 9"/>
+        </svg>
+        Excel
+      </button>
+      <button class="btn-export btn-export-csv" onclick="exportCSV()" title="Exportar a CSV">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="16 18 22 12 16 6"/>
+          <polyline points="8 6 2 12 8 18"/>
+        </svg>
+        CSV
+      </button>
+    </div>
+    <a class="btn-sm" href="{{ pagar_url }}">&larr; Planes</a>
+  </div>
+</header>
+
+<div class="page">
+  <div class="page-title">
+    <h1>Historial de cobros</h1>
+    <p>Registro completo de transacciones y pagos procesados</p>
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi kpi-1">
+      <div class="kpi-label">Total facturado</div>
+      <div class="kpi-value accent" id="kpi-gastado">$0</div>
+    </div>
+    <div class="kpi kpi-2">
+      <div class="kpi-label">Transacciones</div>
+      <div class="kpi-value" id="kpi-total">0</div>
+    </div>
+    <div class="kpi kpi-3">
+      <div class="kpi-label">Aprobadas</div>
+      <div class="kpi-value" id="kpi-ok">0</div>
+    </div>
+    <div class="kpi kpi-4">
+      <div class="kpi-label">Rechazadas</div>
+      <div class="kpi-value warn" id="kpi-fail">0</div>
+    </div>
+  </div>
+
+  <div class="filters-row">
+    <div class="filters">
+      <button class="f-btn" data-p="dia">Hoy</button>
+      <button class="f-btn" data-p="semana">7 d&iacute;as</button>
+      <button class="f-btn" data-p="mes">30 d&iacute;as</button>
+      <button class="f-btn" data-p="trimestre">90 d&iacute;as</button>
+      <button class="f-btn" data-p="anio">12 meses</button>
+      <button class="f-btn active" data-p="total">Todo</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <div class="table-header">
+      <span class="table-title">Transacciones</span>
+      <span class="table-count" id="table-count">&mdash;</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Descripci&oacute;n</th>
+          <th>Tipo</th>
+          <th>Estado</th>
+          <th style="text-align:right">Monto</th>
+          <th style="text-align:center">V&iacute;a</th>
+          <th>RUT Paciente</th>
+        </tr>
+      </thead>
+      <tbody id="tb"></tbody>
+    </table>
+  </div>
+
+  <div class="page-footer">IMAGIAX &mdash; Plataforma de an&aacute;lisis radiol&oacute;gico con IA</div>
+</div>
+
+<script>
+const API="{{ api_base }}";
+const fmt=n=>'$'+Number(n).toLocaleString('es-CL');
+const fdate=iso=>{const d=new Date(iso);return d.toLocaleDateString('es-CL',{day:'2-digit',month:'short',year:'numeric'})+' '+d.toLocaleTimeString('es-CL',{hour:'2-digit',minute:'2-digit'})};
+const tipos={scan_automatico:'Cobro por informe',pago_unico:'Pago \u00fanico',suscripcion:'Suscripci\u00f3n',pack:'Pack',trial:'Trial'};
+const estados={approved:'Aprobado',rejected:'Rechazado',pending:'Pendiente',error:'Error'};
+const origenes={mercadopago:'MP',transbank:'TBK'};
+
+let _allCobros=[];
+const PAGE_SIZE=20;
+let _page=1;
+
+function renderPage(){
+  const tb=document.getElementById('tb');
+  const start=(_page-1)*PAGE_SIZE, end=_page*PAGE_SIZE;
+  const slice=_allCobros.slice(start,end);
+  const cnt=document.getElementById('table-count');
+  if(cnt)cnt.textContent=_allCobros.length?_allCobros.length+' registros':'';
+  if(!slice.length){tb.innerHTML='<tr><td colspan="7"><div class="empty-state"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg><div class="empty-state-title">Sin transacciones</div><p>No hay registros en este per\u00edodo</p></div></td></tr>';return}
+  tb.innerHTML=slice.map(c=>'<tr>'
+    +'<td class="cell-fecha">'+fdate(c.created_at)+'</td>'
+    +'<td class="cell-desc" title="'+(c.descripcion||'')+'">'+(c.descripcion||'&mdash;')+'</td>'
+    +'<td class="cell-tipo">'+(tipos[c.tipo]||c.tipo)+'</td>'
+    +'<td><span class="badge badge-'+c.estado+'"><span class="badge-dot dot-'+c.estado+'"></span>'+(estados[c.estado]||c.estado)+'</span></td>'
+    +'<td class="cell-monto">'+fmt(c.monto_clp)+'</td>'
+    +'<td class="cell-via">'+(origenes[c.origen]||c.origen||'MP')+'</td>'
+    +'<td class="cell-rut">'+(c.patient_id||'&mdash;')+'</td>'
+    +'</tr>').join('');
+  const pages=Math.ceil(_allCobros.length/PAGE_SIZE);
+  let pg=document.getElementById('pager');
+  if(!pg){pg=document.createElement('div');pg.id='pager';pg.style.cssText='display:flex;justify-content:center;gap:8px;margin-top:16px;align-items:center;font-size:13px;color:#94a3b8';
+    document.querySelector('.table-wrap').after(pg)}
+  if(pages<=1){pg.innerHTML='';return}
+  pg.innerHTML='<button class="f-btn'+(1===_page?' active':'')+'" onclick="_page=1;renderPage()">&laquo;</button>'
+    +'<button class="f-btn'+(_page<=1?' active':'')+'" onclick="_page=Math.max(1,_page-1);renderPage()">&lsaquo;</button>'
+    +'<span style="padding:0 8px">'+_page+' / '+pages+'</span>'
+    +'<button class="f-btn'+(_page>=pages?' active':'')+'" onclick="_page=Math.min('+pages+',_page+1);renderPage()">&rsaquo;</button>'
+    +'<button class="f-btn'+(pages===_page?' active':'')+'" onclick="_page='+pages+';renderPage()">&raquo;</button>';
+}
+
+async function load(p){
+  document.querySelectorAll('.f-btn[data-p]').forEach(b=>b.classList.toggle('active',b.dataset.p===p));
+  try{
+    const r=await fetch(API+'/pagos/historial-cobros?periodo='+p);
+    const d=await r.json();
+    document.getElementById('kpi-gastado').textContent=fmt(d.resumen.total_gastado);
+    document.getElementById('kpi-total').textContent=d.resumen.total_transacciones;
+    document.getElementById('kpi-ok').textContent=d.resumen.aprobados;
+    document.getElementById('kpi-fail').textContent=d.resumen.rechazados;
+    _allCobros=d.cobros||[];_page=1;renderPage();
+  }catch(e){
+    document.getElementById('tb').innerHTML='<tr><td colspan="7" class="empty-state"><p>Error al cargar historial</p></td></tr>';
+  }
+}
+
+function exportCSV(){
+  if(!_allCobros.length)return;
+  const hdr='Fecha,Descripcion,Tipo,Estado,Monto CLP,Via,RUT Paciente\\n';
+  const rows=_allCobros.map(c=>[
+    '"'+fdate(c.created_at)+'"',
+    '"'+(c.descripcion||'').replace(/"/g,'""')+'"',
+    tipos[c.tipo]||c.tipo,
+    estados[c.estado]||c.estado,
+    c.monto_clp,
+    origenes[c.origen]||c.origen||'MP',
+    c.patient_id||''
+  ].join(',')).join('\\n');
+  const blob=new Blob([hdr+rows],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='imagiax_historial.csv';a.click();URL.revokeObjectURL(a.href);
+}
+
+function exportExcel(){
+  const p=document.querySelector('.f-btn[data-p].active');
+  const periodo=p?p.dataset.p:'total';
+  window.open(API+'/pagos/exportar-excel?periodo='+periodo,'_blank');
+}
+
+document.querySelectorAll('.f-btn[data-p]').forEach(b=>b.addEventListener('click',()=>load(b.dataset.p)));
+load('total');
+</script>
+</body>
+</html>

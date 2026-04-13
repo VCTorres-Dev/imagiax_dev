@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}
+{% if status == 'exito' %}IMAGIAX — ¡Pago aprobado!
+{% elif status == 'pendiente' %}IMAGIAX — Pago en proceso
+{% else %}IMAGIAX — Error de pago
+{% endif %}
+{% endblock %}
+
+{% block extra_styles %}
+{% if status == 'exito' %}
+body { --glow-color: rgba(34,197,94,.08); }
+{% elif status == 'pendiente' %}
+body { --glow-color: rgba(245,158,11,.07); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.icon-spin { animation: spin 2s linear infinite; transform-origin: center; }
+{% else %}
+body { --glow-color: rgba(239,68,68,.07); }
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="page-center">
+  <div style="width:100%;max-width:460px">
+    <nav class="result-nav">
+      <div class="result-nav-logo">IX</div>
+      <div>
+        <div class="result-nav-name">IMAGIAX</div>
+        <div class="result-nav-tag">Medical AI Platform</div>
+      </div>
+    </nav>
+
+    {% if status == 'exito' %}
+    <div class="result-card" style="--accent-line: #22c55e">
+      <div class="result-icon success">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </div>
+      <h1 class="result-title">{{ "¡Suscripción activada!" if es_suscripcion else "¡Pago aprobado!" }}</h1>
+      <p class="result-subtitle">{{ plan_title }}</p>
+      <div class="creditos-box">
+        <div class="creditos-num">+{{ creditos_nuevos }}</div>
+        <div class="creditos-lbl">créditos acreditados</div>
+        <div class="creditos-total">Total disponible: <strong>{{ creditos_totales }}</strong> informes</div>
+      </div>
+      {% if es_suscripcion %}
+      <div class="renewal-note">🔄 Tu suscripción se renueva automáticamente cada 30 días.</div>
+      {% endif %}
+      {% if email %}
+      <p class="email-confirm">Confirmación enviada a <strong>{{ email }}</strong></p>
+      {% endif %}
+      <div class="result-actions">
+        <a href="{{ viewer_url }}" class="btn-primary">Volver al visor</a>
+        <a href="{{ pagar_url }}" class="btn-secondary">Ver mis planes</a>
+      </div>
+    </div>
+
+    {% elif status == 'pendiente' %}
+    <div class="result-card" style="--accent-line: #f59e0b">
+      <div class="result-icon pending">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round">
+          <circle cx="12" cy="12" r="10" class="icon-spin" stroke-dasharray="50 14"/>
+          <polyline points="12 6 12 12 16 14" stroke-width="2.5"/>
+        </svg>
+      </div>
+      <h1 class="result-title">Pago en proceso</h1>
+      <p class="result-subtitle">Tu transacción está siendo verificada</p>
+      <p class="result-body">
+        MercadoPago está procesando el pago. Esto puede tomar algunos minutos.
+        Una vez confirmado, tus créditos se acreditarán automáticamente y recibirás una notificación.
+      </p>
+      {% if payment_id %}
+      <div class="payment-id">ID: {{ payment_id }}</div>
+      {% endif %}
+      <hr class="result-divider">
+      <div class="result-actions">
+        <a href="{{ viewer_url }}" class="btn-primary">Volver al visor</a>
+        <a href="{{ pagar_url }}" class="btn-secondary">Ver mis planes</a>
+      </div>
+    </div>
+
+    {% else %}
+    <div class="result-card" style="--accent-line: #ef4444">
+      <div class="result-icon error">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </div>
+      <h1 class="result-title">Error en el pago</h1>
+      <p class="result-body">{{ mensaje }}</p>
+      <hr class="result-divider">
+      <div class="result-actions">
+        <a href="{{ pagar_url }}" class="btn-primary">Reintentar</a>
+        <a href="{{ viewer_url }}" class="btn-secondary">Volver al visor</a>
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}

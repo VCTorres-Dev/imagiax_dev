@@ -17,9 +17,9 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$ORTHANC_DIR = "c:\Users\WinterOS\Documents\Workspace\IMAGIAX\OHIF Medical Imaging Viewer\orthanc-imagiax"
-$OHIF_DIR = "c:\Users\WinterOS\Documents\Workspace\IMAGIAX\OHIF Medical Imaging Viewer\Viewers\platform\app"
-$IMAGIAX_DIR = "c:\Users\WinterOS\Documents\Workspace\IMAGIAX"
+$ORTHANC_DIR = "c:\Users\WinterOS\Documents\Workspace\IMAGIAX - copia (2)\OHIF Medical Imaging Viewer\orthanc-imagiax"
+$OHIF_DIR = "c:\Users\WinterOS\Documents\Workspace\IMAGIAX - copia (2)\OHIF Medical Imaging Viewer\Viewers\platform\app"
+$IMAGIAX_DIR = "c:\Users\WinterOS\Documents\Workspace\IMAGIAX - copia (2)"
 $ORTHANC_URL = "http://localhost:8042"
 $OHIF_URL    = "http://localhost:3000"
 $AI_API_URL  = "http://localhost:8010"

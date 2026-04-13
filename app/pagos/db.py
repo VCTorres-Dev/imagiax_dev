@@ -1,17 +1,14 @@
 """
-IMAGIAX — Módulo de base de datos para pagos, licencias y créditos.
+app.pagos.db -- Payment database layer.
 
-Tablas gestionadas:
-  configuracion  → clave/valor por instalación (ej: installation_id)
-  clientes       → centros médicos identificados por email
-  licencias      → licencias de créditos (trial, packs, suscripciones)
-  pagos_mp       → registro de todas las transacciones MercadoPago
-
-Comparte el pool de asyncpg con imagiax_db (misma base de datos PostgreSQL).
+Extracted from imagiax_pagos_db.py.
+All functions receive pool: asyncpg.Pool as first parameter.
+No global pool access -- dependency injection via app.core.database.get_db_pool.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -20,9 +17,9 @@ from typing import Any
 
 import asyncpg
 
-logger = logging.getLogger("imagiax.pagos_db")
+logger = logging.getLogger("imagiax.pagos.db")
 
-# ── PCI Data Masking (SEC-PAY-009) ────────────────────────────────────────────
+# -- PCI Data Masking (SEC-PAY-009) -------------------------------------------
 _PCI_MASK_KEYS = frozenset({
     "card_number", "card_holder_name", "card_detail",
     "first_six_digits", "last_four_digits", "cvv", "pan",
@@ -41,22 +38,11 @@ def _mask_pci_data(data: Any) -> Any:
     return data
 
 
-# ── Pool compartido con imagiax_db ────────────────────────────────────────────
-# get_pool() se importa en tiempo de ejecución para evitar dependencia circular.
+# -- Creacion de tablas --------------------------------------------------------
 
-
-def _get_pool() -> asyncpg.Pool:
-    from imagiax_db import get_pool
-    return get_pool()
-
-
-# ── Creación de tablas ────────────────────────────────────────────────────────
-
-async def create_tables() -> None:
+async def create_tables(pool: asyncpg.Pool) -> None:
     """Crea o migra las tablas de pagos. Idempotente (IF NOT EXISTS)."""
-    pool = _get_pool()
     async with pool.acquire() as conn:
-        # Configuración por instalación (clave/valor)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS configuracion (
                 clave      TEXT PRIMARY KEY,
@@ -65,7 +51,6 @@ async def create_tables() -> None:
             )
         """)
 
-        # Clientes: centros médicos identificados por email
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS clientes (
                 id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -77,7 +62,6 @@ async def create_tables() -> None:
             )
         """)
 
-        # Licencias: trial, packs o suscripciones con créditos
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS licencias (
                 id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -94,7 +78,6 @@ async def create_tables() -> None:
             )
         """)
 
-        # Pagos MercadoPago: log de cada transacción
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS pagos_mp (
                 id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -112,7 +95,6 @@ async def create_tables() -> None:
             )
         """)
 
-        # Índices
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_licencias_tipo ON licencias(tipo)"
         )
@@ -128,7 +110,6 @@ async def create_tables() -> None:
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pagos_mp_preapproval ON pagos_mp(mp_preapproval_id)"
         )
-        # Índices para JOINs y queries temporales (corrigen gaps de rendimiento)
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_licencias_cliente ON licencias(cliente_id)"
         )
@@ -145,7 +126,6 @@ async def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_pagos_mp_estado ON pagos_mp(estado)"
         )
 
-        # Tarjetas Oneclick (Transbank): inscripciones para cobro silencioso
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS tarjetas_oneclick (
                 id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -163,8 +143,6 @@ async def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_oneclick_username ON tarjetas_oneclick(username)"
         )
 
-        # ── Migraciones de aislamiento per-usuario ────────────────────────────
-        # Cada usuario tiene sus propios créditos, tarjetas y métodos de pago.
         for migration_sql in [
             "ALTER TABLE licencias ADD COLUMN IF NOT EXISTS usuario_id UUID",
             "ALTER TABLE tarjetas_oneclick ADD COLUMN IF NOT EXISTS usuario_id UUID",
@@ -174,9 +152,8 @@ async def create_tables() -> None:
             try:
                 await conn.execute(migration_sql)
             except Exception:
-                pass  # Columna/índice ya existe
+                pass
 
-        # Pagos Transbank: log de transacciones Oneclick
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS pagos_tbk (
                 id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -199,7 +176,6 @@ async def create_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_pagos_tbk_created ON pagos_tbk(created_at DESC)"
         )
 
-        # Inscripciones TBK en curso: mapea TBK_TOKEN → usuario_id (10 min TTL)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS tbk_pending (
                 tbk_token   TEXT PRIMARY KEY,
@@ -209,7 +185,6 @@ async def create_tables() -> None:
             )
         """)
 
-        # Migración: corregir usernames con URL-encoding (%40 en lugar de @)
         fixed = await conn.execute(
             """
             UPDATE tarjetas_oneclick
@@ -218,19 +193,18 @@ async def create_tables() -> None:
             """
         )
         if fixed and fixed != "UPDATE 0":
-            logger.info("Migración: usernames Oneclick corregidos — %s", fixed)
+            logger.info("Migracion: usernames Oneclick corregidos -- %s", fixed)
 
-    print("IMAGIAX Pagos DB: tablas de pagos/licencias listas.")
+    logger.info("IMAGIAX Pagos DB: tablas de pagos/licencias listas.")
 
 
-# ── Configuración / Installation ID ──────────────────────────────────────────
+# -- Configuracion / Installation ID ------------------------------------------
 
-async def get_or_create_installation_id() -> str:
+async def get_or_create_installation_id(pool: asyncpg.Pool) -> str:
     """
-    Retorna el installation_id único de esta instancia IMAGIAX.
+    Retorna el installation_id unico de esta instancia IMAGIAX.
     Si no existe lo crea (primera vez que corre el servidor).
     """
-    pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT valor FROM configuracion WHERE clave = 'installation_id'"
@@ -250,8 +224,7 @@ async def get_or_create_installation_id() -> str:
         return new_id
 
 
-async def get_config(clave: str) -> str | None:
-    pool = _get_pool()
+async def get_config(pool: asyncpg.Pool, clave: str) -> str | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT valor FROM configuracion WHERE clave = $1", clave
@@ -259,8 +232,7 @@ async def get_config(clave: str) -> str | None:
     return row["valor"] if row else None
 
 
-async def set_config(clave: str, valor: str) -> None:
-    pool = _get_pool()
+async def set_config(pool: asyncpg.Pool, clave: str, valor: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -274,18 +246,16 @@ async def set_config(clave: str, valor: str) -> None:
         )
 
 
-# ── Trial automático ──────────────────────────────────────────────────────────
+# -- Trial automatico ----------------------------------------------------------
 
 CREDITOS_TRIAL = 5
 
 
-async def get_or_create_trial(usuario_id: str | None = None) -> dict[str, Any]:
+async def get_or_create_trial(pool: asyncpg.Pool, usuario_id: str | None = None) -> dict[str, Any]:
     """
     Retorna la licencia trial activa del usuario.
-    Si no existe, la crea automáticamente con CREDITOS_TRIAL créditos.
-    Si usuario_id es None, usa el modelo legacy de instalación compartida.
+    Si no existe, la crea automaticamente con CREDITOS_TRIAL creditos.
     """
-    pool = _get_pool()
     _uid = uuid.UUID(usuario_id) if usuario_id else None
     async with pool.acquire() as conn:
         if _uid:
@@ -315,7 +285,6 @@ async def get_or_create_trial(usuario_id: str | None = None) -> dict[str, Any]:
         if row:
             return _row_to_dict(row)
 
-        # Crear trial por primera vez para este usuario
         row = await conn.fetchrow(
             """
             INSERT INTO licencias (tipo, creditos_total, usuario_id)
@@ -325,60 +294,71 @@ async def get_or_create_trial(usuario_id: str | None = None) -> dict[str, Any]:
             CREDITOS_TRIAL,
             _uid,
         )
-        logger.info("Trial creado para usuario=%s (%d créditos)", usuario_id or "instalación", CREDITOS_TRIAL)
+        logger.info("Trial creado para usuario=%s (%d creditos)", usuario_id or "instalacion", CREDITOS_TRIAL)
         return _row_to_dict(row)
 
 
-# ── Créditos disponibles (agregado de todas las licencias activas) ────────────
+# -- Creditos disponibles (agregado de todas las licencias activas) ------------
 
-async def get_estado_creditos(usuario_id: str | None = None) -> dict[str, Any]:
+async def get_estado_creditos(pool: asyncpg.Pool, usuario_id: str | None = None) -> dict[str, Any]:
     """
-    Retorna el estado consolidado de créditos del usuario.
-    Si usuario_id es None, usa el modelo legacy de instalación compartida.
+    Retorna el estado consolidado de creditos del usuario.
+    Si usuario_id es None, usa el modelo legacy de instalacion compartida.
+
+    P1-FIX: The 3 independent DB queries (licencias, metodo_pago, oneclick) now
+    run concurrently via asyncio.gather — reduces latency from 3 sequential
+    round-trips to 1 (the slowest of the 3).
     """
-    pool = _get_pool()
     _uid = uuid.UUID(usuario_id) if usuario_id else None
-    async with pool.acquire() as conn:
-        if _uid:
-            rows = await conn.fetch(
-                """
-                SELECT id, tipo, creditos_total, creditos_usados, activa,
-                       fecha_expiracion, created_at
-                FROM licencias
-                WHERE activa = TRUE
-                  AND usuario_id = $1
-                  AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
-                ORDER BY
-                    CASE tipo
-                        WHEN 'trial' THEN 3
-                        WHEN 'suscripcion_mensual' THEN 1
-                        ELSE 2
-                    END,
-                    created_at ASC
-                """,
-                _uid,
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT id, tipo, creditos_total, creditos_usados, activa,
-                       fecha_expiracion, created_at
-                FROM licencias
-                WHERE activa = TRUE
-                  AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
-                ORDER BY
-                    CASE tipo
-                        WHEN 'trial' THEN 3
-                        WHEN 'suscripcion_mensual' THEN 1
-                        ELSE 2
-                    END,
-                    created_at ASC
-                """
-            )
+
+    async def _fetch_licencias() -> list:
+        async with pool.acquire() as conn:
+            if _uid:
+                return await conn.fetch(
+                    """
+                    SELECT id, tipo, creditos_total, creditos_usados, activa,
+                           fecha_expiracion, created_at
+                    FROM licencias
+                    WHERE activa = TRUE
+                      AND usuario_id = $1
+                      AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
+                    ORDER BY
+                        CASE tipo
+                            WHEN 'trial' THEN 3
+                            WHEN 'suscripcion_mensual' THEN 1
+                            ELSE 2
+                        END,
+                        created_at ASC
+                    """,
+                    _uid,
+                )
+            else:
+                return await conn.fetch(
+                    """
+                    SELECT id, tipo, creditos_total, creditos_usados, activa,
+                           fecha_expiracion, created_at
+                    FROM licencias
+                    WHERE activa = TRUE
+                      AND (fecha_expiracion IS NULL OR fecha_expiracion > NOW())
+                    ORDER BY
+                        CASE tipo
+                            WHEN 'trial' THEN 3
+                            WHEN 'suscripcion_mensual' THEN 1
+                            ELSE 2
+                        END,
+                        created_at ASC
+                    """
+                )
+
+    # P1-FIX: Run all 3 independent queries concurrently
+    rows, metodo, oneclick = await asyncio.gather(
+        _fetch_licencias(),
+        get_metodo_pago(pool, usuario_id=usuario_id),
+        get_inscripcion_oneclick_any(pool, usuario_id=usuario_id),
+    )
 
     if not rows:
-        # No hay ninguna licencia activa — crear trial para este usuario
-        trial = await get_or_create_trial(usuario_id=usuario_id)
+        trial = await get_or_create_trial(pool, usuario_id=usuario_id)
         rows_data = [trial]
     else:
         rows_data = [_row_to_dict(r) for r in rows]
@@ -390,12 +370,7 @@ async def get_estado_creditos(usuario_id: str | None = None) -> dict[str, Any]:
     es_solo_trial = all(r["tipo"] == "trial" for r in rows_data)
     tiene_suscripcion = any(str(r["tipo"]).startswith("suscripcion_") for r in rows_data)
 
-    # Verificar si hay tarjeta registrada para cobro automático (per-usuario)
-    metodo = await get_metodo_pago(usuario_id=usuario_id)
     tiene_tarjeta = metodo is not None
-
-    # Verificar si hay inscripción Oneclick (Transbank) — prioridad sobre MP (per-usuario)
-    oneclick = await get_inscripcion_oneclick_any(usuario_id=usuario_id)
     tiene_oneclick = oneclick is not None
 
     return {
@@ -419,14 +394,13 @@ async def get_estado_creditos(usuario_id: str | None = None) -> dict[str, Any]:
     }
 
 
-async def descontar_credito(usuario_id: str | None = None) -> bool:
+async def descontar_credito(pool: asyncpg.Pool, usuario_id: str | None = None) -> bool:
     """
-    Descuenta 1 crédito de la licencia más prioritaria con saldo disponible del usuario.
-    Prioridad: suscripción > packs comprados > trial.
-    Retorna True si se descontó con éxito, False si sin créditos.
+    Descuenta 1 credito de la licencia mas prioritaria con saldo disponible del usuario.
+    Prioridad: suscripcion > packs comprados > trial.
+    Retorna True si se desconto con exito, False si sin creditos.
     """
     try:
-        pool = _get_pool()
         _uid = uuid.UUID(usuario_id) if usuario_id else None
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -481,7 +455,7 @@ async def descontar_credito(usuario_id: str | None = None) -> bool:
         return False
 
 
-# ── Método de pago (tarjeta guardada para cobros automáticos) ─────────────────
+# -- Metodo de pago (tarjeta guardada para cobros automaticos) -----------------
 
 def _mp_card_keys(usuario_id: str | None) -> tuple[str, str, str, str, str]:
     """Retorna las 5 claves de configuracion para la tarjeta MP de un usuario."""
@@ -495,13 +469,12 @@ def _mp_card_keys(usuario_id: str | None) -> tuple[str, str, str, str, str]:
     )
 
 
-async def get_metodo_pago(usuario_id: str | None = None) -> dict[str, Any] | None:
+async def get_metodo_pago(pool: asyncpg.Pool, usuario_id: str | None = None) -> dict[str, Any] | None:
     """
-    Retorna la tarjeta guardada para cobros automáticos del usuario, o None si no hay.
+    Retorna la tarjeta guardada para cobros automaticos del usuario, o None si no hay.
     Cada usuario tiene sus propias claves prefijadas con su usuario_id.
     """
     try:
-        pool = _get_pool()
         keys = _mp_card_keys(usuario_id)
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -510,7 +483,6 @@ async def get_metodo_pago(usuario_id: str | None = None) -> dict[str, Any] | Non
             )
         if not rows:
             return None
-        # Normalizar claves removiendo el sufijo del usuario_id para acceso uniforme
         suffix = f":{usuario_id}" if usuario_id else ""
         data = {r["clave"].replace(suffix, ""): r["valor"] for r in rows}
         if not data.get("mp_customer_id") or not data.get("mp_card_id"):
@@ -528,6 +500,7 @@ async def get_metodo_pago(usuario_id: str | None = None) -> dict[str, Any] | Non
 
 
 async def guardar_metodo_pago(
+    pool: asyncpg.Pool,
     *,
     mp_customer_id: str,
     mp_card_id: str,
@@ -539,12 +512,11 @@ async def guardar_metodo_pago(
     """Persiste los datos de la tarjeta del usuario en configuracion."""
     keys = _mp_card_keys(usuario_id)
     for clave, valor in zip(keys, [mp_customer_id, mp_card_id, card_last4, card_brand, email]):
-        await set_config(clave, valor)
+        await set_config(pool, clave, valor)
 
 
-async def borrar_metodo_pago(usuario_id: str | None = None) -> None:
+async def borrar_metodo_pago(pool: asyncpg.Pool, usuario_id: str | None = None) -> None:
     """Elimina la tarjeta guardada del usuario."""
-    pool = _get_pool()
     keys = list(_mp_card_keys(usuario_id))
     async with pool.acquire() as conn:
         await conn.execute(
@@ -553,11 +525,10 @@ async def borrar_metodo_pago(usuario_id: str | None = None) -> None:
         )
 
 
-# ── TBK Pending (mapeo seguro TBK_TOKEN → usuario_id) ────────────────────────
+# -- TBK Pending (mapeo seguro TBK_TOKEN -> usuario_id) -----------------------
 
-async def tbk_pending_save(tbk_token: str, usuario_id: str, username: str) -> None:
-    """Guarda la relación TBK_TOKEN → usuario_id antes del redirect a Transbank."""
-    pool = _get_pool()
+async def tbk_pending_save(pool: asyncpg.Pool, tbk_token: str, usuario_id: str, username: str) -> None:
+    """Guarda la relacion TBK_TOKEN -> usuario_id antes del redirect a Transbank."""
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO tbk_pending (tbk_token, usuario_id, username) "
@@ -567,9 +538,8 @@ async def tbk_pending_save(tbk_token: str, usuario_id: str, username: str) -> No
         )
 
 
-async def tbk_pending_pop(tbk_token: str) -> dict[str, str] | None:
-    """Recupera y elimina el registro pendiente para el token dado (uso único, TTL 10 min)."""
-    pool = _get_pool()
+async def tbk_pending_pop(pool: asyncpg.Pool, tbk_token: str) -> dict[str, str] | None:
+    """Recupera y elimina el registro pendiente para el token dado (uso unico, TTL 10 min)."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "DELETE FROM tbk_pending WHERE tbk_token = $1 "
@@ -579,9 +549,10 @@ async def tbk_pending_pop(tbk_token: str) -> dict[str, str] | None:
         return dict(row) if row else None
 
 
-# ── Tarjetas Oneclick (Transbank) ─────────────────────────────────────────────
+# -- Tarjetas Oneclick (Transbank) ---------------------------------------------
 
 async def guardar_inscripcion_oneclick(
+    pool: asyncpg.Pool,
     *,
     username: str,
     tbk_user: str,
@@ -591,11 +562,10 @@ async def guardar_inscripcion_oneclick(
     email: str | None = None,
     usuario_id: str | None = None,
 ) -> None:
-    """Guarda o actualiza la inscripción Oneclick de un usuario."""
+    """Guarda o actualiza la inscripcion Oneclick de un usuario."""
     from urllib.parse import unquote
-    username = unquote(username)  # Prevenir %40 en lugar de @
+    username = unquote(username)
     _uid = uuid.UUID(usuario_id) if usuario_id else None
-    pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -616,10 +586,9 @@ async def guardar_inscripcion_oneclick(
         )
 
 
-async def get_inscripcion_oneclick(username: str) -> dict[str, Any] | None:
-    """Retorna la inscripción Oneclick activa del usuario, o None."""
+async def get_inscripcion_oneclick(pool: asyncpg.Pool, username: str) -> dict[str, Any] | None:
+    """Retorna la inscripcion Oneclick activa del usuario, o None."""
     try:
-        pool = _get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -634,17 +603,16 @@ async def get_inscripcion_oneclick(username: str) -> dict[str, Any] | None:
             return None
         return dict(row)
     except Exception as exc:
-        logger.error("Error obteniendo inscripción Oneclick para %s: %s", username, exc)
+        logger.error("Error obteniendo inscripcion Oneclick para %s: %s", username, exc)
         return None
 
 
-async def get_inscripcion_oneclick_any(usuario_id: str | None = None) -> dict[str, Any] | None:
+async def get_inscripcion_oneclick_any(pool: asyncpg.Pool, usuario_id: str | None = None) -> dict[str, Any] | None:
     """
-    Retorna la inscripción Oneclick activa del usuario especificado.
-    Si usuario_id es None, usa modelo legacy (primera activa — solo para compatibilidad).
+    Retorna la inscripcion Oneclick activa del usuario especificado.
+    Si usuario_id es None, usa modelo legacy (primera activa).
     """
     try:
-        pool = _get_pool()
         async with pool.acquire() as conn:
             if usuario_id:
                 _uid = uuid.UUID(usuario_id)
@@ -674,13 +642,12 @@ async def get_inscripcion_oneclick_any(usuario_id: str | None = None) -> dict[st
             return None
         return dict(row)
     except Exception as exc:
-        logger.error("Error obteniendo inscripción Oneclick: %s", exc)
+        logger.error("Error obteniendo inscripcion Oneclick: %s", exc)
         return None
 
 
-async def borrar_inscripcion_oneclick(username: str) -> None:
-    """Desactiva la inscripción Oneclick del usuario."""
-    pool = _get_pool()
+async def borrar_inscripcion_oneclick(pool: asyncpg.Pool, username: str) -> None:
+    """Desactiva la inscripcion Oneclick del usuario."""
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE tarjetas_oneclick SET activa = FALSE WHERE username = $1",
@@ -689,6 +656,7 @@ async def borrar_inscripcion_oneclick(username: str) -> None:
 
 
 async def registrar_pago_tbk(
+    pool: asyncpg.Pool,
     *,
     username: str,
     buy_order: str,
@@ -699,36 +667,38 @@ async def registrar_pago_tbk(
     status: str = "pending",
     response_code: int | None = None,
     raw_response: dict | None = None,
+    patient_id: str | None = None,
 ) -> None:
     """Registra un pago Transbank en pagos_tbk."""
     try:
-        pool = _get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO pagos_tbk
                     (username, buy_order, child_buy_order, authorization_code,
-                     amount, installments_number, status, response_code, raw_response)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     amount, installments_number, status, response_code, raw_response,
+                     patient_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 """,
                 username, buy_order, child_buy_order, authorization_code,
                 amount, installments_number, status, response_code,
-                json.dumps(_mask_pci_data(raw_response)) if raw_response else None,  # SEC-PAY-009
+                json.dumps(_mask_pci_data(raw_response)) if raw_response else None,
+                patient_id,
             )
     except Exception as exc:
         logger.error("Error registrando pago TBK: %s", exc)
 
 
-# ── Clientes ──────────────────────────────────────────────────────────────────
+# -- Clientes ------------------------------------------------------------------
 
 async def crear_o_buscar_cliente(
+    pool: asyncpg.Pool,
     email: str,
     centro_medico: str,
     nombre_contacto: str | None = None,
     rut_empresa: str | None = None,
 ) -> dict[str, Any]:
     """Upsert de cliente por email. Retorna el registro."""
-    pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -748,9 +718,10 @@ async def crear_o_buscar_cliente(
     return _row_to_dict(row)
 
 
-# ── Licencias / Créditos comprados ────────────────────────────────────────────
+# -- Licencias / Creditos comprados --------------------------------------------
 
 async def acreditar_pago(
+    pool: asyncpg.Pool,
     *,
     cliente_id: str,
     tipo: str,
@@ -762,11 +733,9 @@ async def acreditar_pago(
     usuario_id: str | None = None,
 ) -> dict[str, Any]:
     """
-    Crea una nueva licencia con créditos después de un pago aprobado.
+    Crea una nueva licencia con creditos despues de un pago aprobado.
     Idempotente: usa INSERT ON CONFLICT DO NOTHING RETURNING para atomicidad (SEC-PAY-005, AD-5).
-    Elimina TOCTOU race condition del SELECT-then-INSERT pattern anterior.
     """
-    pool = _get_pool()
     fecha_exp = None
     if duracion_dias:
         fecha_exp = datetime.now(timezone.utc) + timedelta(days=duracion_dias)
@@ -779,7 +748,7 @@ async def acreditar_pago(
                 INSERT INTO licencias
                     (cliente_id, tipo, creditos_total, mp_payment_id,
                      mp_preference_id, mp_preapproval_id, fecha_expiracion, usuario_id)
-                VALUES (, , , , , , , )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (mp_payment_id) DO NOTHING
                 RETURNING *
                 """,
@@ -793,21 +762,19 @@ async def acreditar_pago(
                 _uid,
             )
             if row is None:
-                # Already processed (idempotent) — fetch the existing row
                 row = await conn.fetchrow(
-                    "SELECT * FROM licencias WHERE mp_payment_id = ",
+                    "SELECT * FROM licencias WHERE mp_payment_id = $1",
                     mp_payment_id,
                 )
     return _row_to_dict(row)
 
 
-async def renovar_suscripcion(mp_preapproval_id: str, creditos_nuevos: int) -> bool:
+async def renovar_suscripcion(pool: asyncpg.Pool, mp_preapproval_id: str, creditos_nuevos: int) -> bool:
     """
-    Renueva los créditos de una suscripción activa.
+    Renueva los creditos de una suscripcion activa.
     Llamado desde el webhook de cargo recurrente aprobado.
     """
     try:
-        pool = _get_pool()
         async with pool.acquire() as conn:
             result = await conn.execute(
                 """
@@ -821,15 +788,13 @@ async def renovar_suscripcion(mp_preapproval_id: str, creditos_nuevos: int) -> b
                 mp_preapproval_id,
                 creditos_nuevos,
             )
-        # asyncpg execute() returns command tag like "UPDATE 1"
         return result is not None and result.split()[-1] != "0"
     except Exception as exc:
         logger.error("Error renovando suscripcion %s: %s", mp_preapproval_id, exc)
         return False
 
 
-async def get_licencia_por_mp_payment(mp_payment_id: str) -> dict[str, Any] | None:
-    pool = _get_pool()
+async def get_licencia_por_mp_payment(pool: asyncpg.Pool, mp_payment_id: str) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM licencias WHERE mp_payment_id = $1",
@@ -838,8 +803,7 @@ async def get_licencia_por_mp_payment(mp_payment_id: str) -> dict[str, Any] | No
     return _row_to_dict(row) if row else None
 
 
-async def get_licencia_por_preference(mp_preference_id: str) -> dict[str, Any] | None:
-    pool = _get_pool()
+async def get_licencia_por_preference(pool: asyncpg.Pool, mp_preference_id: str) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM licencias WHERE mp_preference_id = $1",
@@ -848,8 +812,7 @@ async def get_licencia_por_preference(mp_preference_id: str) -> dict[str, Any] |
     return _row_to_dict(row) if row else None
 
 
-async def get_licencia_por_preapproval(mp_preapproval_id: str) -> dict[str, Any] | None:
-    pool = _get_pool()
+async def get_licencia_por_preapproval(pool: asyncpg.Pool, mp_preapproval_id: str) -> dict[str, Any] | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM licencias WHERE mp_preapproval_id = $1",
@@ -858,9 +821,10 @@ async def get_licencia_por_preapproval(mp_preapproval_id: str) -> dict[str, Any]
     return _row_to_dict(row) if row else None
 
 
-# ── Registro de pagos ─────────────────────────────────────────────────────────
+# -- Registro de pagos ---------------------------------------------------------
 
 async def registrar_pago(
+    pool: asyncpg.Pool,
     *,
     cliente_id: str | None,
     licencia_id: str | None,
@@ -872,15 +836,16 @@ async def registrar_pago(
     monto_clp: int,
     descripcion: str,
     raw_webhook: dict | None = None,
+    patient_id: str | None = None,
 ) -> str:
-    pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO pagos_mp (
                 cliente_id, licencia_id, mp_payment_id, mp_preference_id,
-                mp_preapproval_id, tipo, estado, monto_clp, descripcion, raw_webhook
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+                mp_preapproval_id, tipo, estado, monto_clp, descripcion, raw_webhook,
+                patient_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
             ON CONFLICT (mp_payment_id) DO UPDATE
                 SET estado = EXCLUDED.estado,
                     raw_webhook = EXCLUDED.raw_webhook
@@ -895,15 +860,15 @@ async def registrar_pago(
             estado,
             monto_clp,
             descripcion,
-            json.dumps(_mask_pci_data(raw_webhook), ensure_ascii=False, default=str) if raw_webhook else None,  # SEC-PAY-009
+            json.dumps(_mask_pci_data(raw_webhook), ensure_ascii=False, default=str) if raw_webhook else None,
+            patient_id,
         )
     return str(row["id"])
 
 
-# ── Admin ─────────────────────────────────────────────────────────────────────
+# -- Admin ---------------------------------------------------------------------
 
-async def get_admin_resumen() -> dict[str, Any]:
-    pool = _get_pool()
+async def get_admin_resumen(pool: asyncpg.Pool) -> dict[str, Any]:
     async with pool.acquire() as conn:
         total_clientes = await conn.fetchval("SELECT COUNT(*) FROM clientes")
         total_licencias_activas = await conn.fetchval(
@@ -938,14 +903,10 @@ async def get_admin_resumen() -> dict[str, Any]:
     }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 
-async def buscar_pago_por_mp_id(mp_payment_id: str) -> dict[str, Any] | None:
-    """
-    Busca un pago por su mp_payment_id en la tabla pagos_mp.
-    Retorna None si no existe.
-    """
-    pool = _get_pool()
+async def buscar_pago_por_mp_id(pool: asyncpg.Pool, mp_payment_id: str) -> dict[str, Any] | None:
+    """Busca un pago por su mp_payment_id en la tabla pagos_mp. Retorna None si no existe."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM pagos_mp WHERE mp_payment_id = $1",
@@ -954,14 +915,14 @@ async def buscar_pago_por_mp_id(mp_payment_id: str) -> dict[str, Any] | None:
     return _row_to_dict(row) if row else None
 
 
-async def get_historial_cobros(periodo: str = "total") -> dict[str, Any]:
+async def get_historial_cobros(pool: asyncpg.Pool, periodo: str = "total") -> dict[str, Any]:
     """
     Obtiene el historial de cobros unificado (MercadoPago + Transbank) con filtro temporal.
     periodo: "dia", "semana", "mes", "trimestre", "anio", "total"
-    """
-    pool = _get_pool()
 
-    # Mapeo a timedelta — asyncpg los convierte nativamente a interval de PG
+    NOTA: Este query es INTENCIONALMENTE sin filtro por usuario_id — es una vista
+    administrativa que muestra TODAS las transacciones de la plataforma. Ver BUG-013.
+    """
     _INTERVALOS = {
         "dia":       timedelta(days=1),
         "semana":    timedelta(days=7),
@@ -969,18 +930,22 @@ async def get_historial_cobros(periodo: str = "total") -> dict[str, Any]:
         "trimestre": timedelta(days=90),
         "anio":      timedelta(days=365),
     }
-    td = _INTERVALOS.get(periodo)  # None si "total"
+    td = _INTERVALOS.get(periodo)
 
-    # Query unificada: UNION ALL de pagos_mp + pagos_tbk con columnas homogéneas
     _UNION_BASE = """
-        SELECT id, tipo, estado, monto_clp, descripcion, created_at, mp_payment_id AS ref_id, 'mercadopago' AS origen
+        SELECT id, tipo, estado, monto_clp, descripcion, created_at, mp_payment_id AS ref_id, 'mercadopago' AS origen, patient_id
         FROM pagos_mp
         WHERE estado IN ('approved', 'rejected', 'pending')
         UNION ALL
         SELECT id, 'scan_automatico' AS tipo, status AS estado, amount AS monto_clp,
-               'Informe radiologico IA (Oneclick)' AS descripcion, created_at, buy_order AS ref_id, 'transbank' AS origen
+               'Informe radiologico IA (Oneclick)' AS descripcion, created_at, buy_order AS ref_id, 'transbank' AS origen, patient_id
         FROM pagos_tbk
         WHERE status IN ('approved', 'rejected', 'error')
+        UNION ALL
+        SELECT id, 'creditos' AS tipo, 'approved' AS estado, 0 AS monto_clp,
+               'Informe radiologico IA (Credito)' AS descripcion, created_at, id::text AS ref_id, 'creditos' AS origen, patient_id
+        FROM informes
+        WHERE cobro_metodo = 'creditos' AND cobro_estado = 'pagado'
     """
 
     try:
@@ -1044,18 +1009,13 @@ async def get_historial_cobros(periodo: str = "total") -> dict[str, Any]:
     }
 
 
-async def get_historial_completo(limite: int = 100) -> list[dict[str, Any]]:
-    """
-    Obtiene el historial completo de transacciones para mostrar en la pestaña Historial.
-    Incluye cobros, informes generados, packs comprados.
-    """
-    pool = _get_pool()
+async def get_historial_completo(pool: asyncpg.Pool, limite: int = 100) -> list[dict[str, Any]]:
+    """Obtiene el historial completo de transacciones."""
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT created_at, descripcion, tipo_detalle, estado, monto, via, origen FROM (
-                    -- Cobros MercadoPago (packs y suscripciones)
                     SELECT
                         created_at,
                         CASE
@@ -1080,7 +1040,6 @@ async def get_historial_completo(limite: int = 100) -> list[dict[str, Any]]:
 
                     UNION ALL
 
-                    -- Cobros Transbank Oneclick
                     SELECT
                         created_at,
                         'Informe radiologico IA (Oneclick)' AS descripcion,
@@ -1091,6 +1050,19 @@ async def get_historial_completo(limite: int = 100) -> list[dict[str, Any]]:
                         'transbank' AS origen
                     FROM pagos_tbk
                     WHERE status IN ('approved', 'rejected')
+
+                    UNION ALL
+
+                    SELECT
+                        created_at,
+                        'Informe radiologico IA (Credito)' AS descripcion,
+                        'Uso de credito' AS tipo_detalle,
+                        'approved' AS estado,
+                        0 AS monto,
+                        'CRD' AS via,
+                        'creditos' AS origen
+                    FROM informes
+                    WHERE cobro_metodo = 'creditos' AND cobro_estado = 'pagado'
                 ) AS historial
                 ORDER BY created_at DESC
                 LIMIT $1
@@ -1103,12 +1075,8 @@ async def get_historial_completo(limite: int = 100) -> list[dict[str, Any]]:
         return []
 
 
-async def get_consumo_reciente(limite: int = 5) -> list[dict[str, Any]]:
-    """
-    Obtiene los últimos N usos/cobros para mostrar en el panel de estado.
-    Retorna lista simplificada: fecha, tipo, monto, estado.
-    """
-    pool = _get_pool()
+async def get_consumo_reciente(pool: asyncpg.Pool, limite: int = 5) -> list[dict[str, Any]]:
+    """Obtiene los ultimos N usos/cobros para mostrar en el panel de estado."""
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -1131,9 +1099,8 @@ async def get_consumo_reciente(limite: int = 5) -> list[dict[str, Any]]:
         return []
 
 
-async def get_suscripcion_activa(usuario_id: str | None = None) -> dict[str, Any] | None:
-    """Obtiene la suscripción activa del usuario sin modificar estado."""
-    pool = _get_pool()
+async def get_suscripcion_activa(pool: asyncpg.Pool, usuario_id: str | None = None) -> dict[str, Any] | None:
+    """Obtiene la suscripcion activa del usuario sin modificar estado."""
     _uid = uuid.UUID(usuario_id) if usuario_id else None
     try:
         async with pool.acquire() as conn:
@@ -1164,9 +1131,8 @@ async def get_suscripcion_activa(usuario_id: str | None = None) -> dict[str, Any
         return None
 
 
-async def desactivar_licencia(licencia_id: str) -> tuple[bool, str]:
-    """Desactiva una licencia específica por id."""
-    pool = _get_pool()
+async def desactivar_licencia(pool: asyncpg.Pool, licencia_id: str) -> tuple[bool, str]:
+    """Desactiva una licencia especifica por id."""
     try:
         async with pool.acquire() as conn:
             result = await conn.execute(
@@ -1178,7 +1144,7 @@ async def desactivar_licencia(licencia_id: str) -> tuple[bool, str]:
         return True, "Licencia desactivada correctamente."
     except Exception as exc:
         logger.error("Error desactivando licencia %s: %s", licencia_id, exc)
-        return False, f"Error al desactivar licencia: {exc}"
+        return False, "Error al desactivar licencia"
 
 
 def _row_to_dict(row: asyncpg.Record | dict) -> dict[str, Any]:
@@ -1191,7 +1157,6 @@ def _row_to_dict(row: asyncpg.Record | dict) -> dict[str, Any]:
             result[key] = value.isoformat()
         else:
             result[key] = value
-    # Alias para compatibilidad frontend: created_at → timestamp_creacion
     if "created_at" in result and "timestamp_creacion" not in result:
         result["timestamp_creacion"] = result["created_at"]
     return result

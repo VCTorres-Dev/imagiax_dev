@@ -56,6 +56,15 @@ export interface GenerarInformeResponse {
   creditos_restantes: number | null;
   pago_automatico: PagoAutomaticoInfo | null;
   advertencia: string;
+  // v1.1 pipeline fields
+  pipeline_version?: string;
+  pipeline_id?: string | null;
+  /** Quality gate verdict: adequate | suboptimal | not_analyzable */
+  calidad_imagen?: 'adequate' | 'suboptimal' | 'not_analyzable' | null;
+  /** Audit state: sin_hallazgos | observaciones | alerta | sin_auditoria */
+  auditoria_estado?: 'sin_hallazgos' | 'observaciones' | 'alerta' | 'sin_auditoria' | null;
+  /** Manual review required — set when auditor blocks twice */
+  requiere_revision_manual?: boolean;
 }
 
 export interface PagoAutomaticoInfo {
@@ -113,6 +122,16 @@ export interface InformeDB {
   notas_rechazo: string | null;
   timestamp_creacion: string;
   timestamp_decision: string | null;
+  // Fields from /informes/listado endpoint (created_at may be returned instead of timestamp_creacion)
+  created_at?: string;
+  usuario_id?: string;
+  usuario_email?: string;
+  cobro_estado?: string;
+  cobro_metodo?: string;
+  cobro_monto_clp?: number;
+  cobro_ref_id?: string;
+  patient_age?: string | null;
+  nota_clinica?: string | null;
 }
 
 export interface SaludResponse {
@@ -154,6 +173,30 @@ export class ImagiaxTimeoutError extends Error {
   }
 }
 
+// ── Auth state ─────────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  user_id: string;
+  email: string;
+  nombre: string;
+  rol: string;
+}
+
+export async function getCurrentUser(): Promise<AuthUser> {
+  const res = await fetch(`${API_BASE_URL}/auth/me`, {
+    credentials: 'include',
+  });
+  if (!res.ok) throw new ImagiaxApiError(res.status, 'No autenticado');
+  const data = await res.json();
+  return data.user as AuthUser;
+}
+
+export async function logoutApi(): Promise<void> {
+  await fetch(`${API_BASE_URL}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+}
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /**
@@ -168,7 +211,7 @@ async function apiRequest<T>(
   timeoutMs: number = TIMEOUTS.DEFAULT
 ): Promise<T> {
   const url = `${API_BASE_URL}${path}`;
-  
+
   // Crear AbortController para timeout
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -176,6 +219,7 @@ async function apiRequest<T>(
   try {
     const response = await fetch(url, {
       ...options,
+      credentials: 'include',
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
@@ -183,10 +227,14 @@ async function apiRequest<T>(
       },
     });
 
+    if (response.status === 401) {
+      throw new ImagiaxApiError(401, 'Sesión expirada. Por favor, inicia sesión nuevamente.');
+    }
+
     if (!response.ok) {
       let detail = response.statusText;
       try {
-        const errorBody = await response.json();
+        const errorBody = await response.json() as { detail?: string; message?: string };
         detail = errorBody.detail || errorBody.message || detail;
       } catch {
         // Non-JSON error body — use statusText
@@ -220,10 +268,19 @@ export async function checkSalud(): Promise<SaludResponse> {
  * Returns the generated report text, AI results, and the informe_id for tracking.
  * 
  * ⚠ Este endpoint puede tomar 30-90 segundos. Timeout: 2 minutos.
+ *
+ * @param studyInstanceUID - DICOM Study Instance UID
+ * @param maxInstances     - Max DICOM instances to analyze (default 50)
+ * @param notaClinica      - Optional clinical note from physician (max 500 chars, v1.1)
+ * @param solicitarAuditoria - Request manual audit pass (v1.1)
+ * @param versionPipeline  - Pipeline version override: "1.0" | "1.1" (omit to use server default)
  */
 export async function generarInforme(
   studyInstanceUID: string,
-  maxInstances: number = 5
+  maxInstances: number = 50,
+  notaClinica?: string,
+  solicitarAuditoria: boolean = false,
+  versionPipeline?: string
 ): Promise<GenerarInformeResponse> {
   return apiRequest<GenerarInformeResponse>(
     '/generar/informe',
@@ -232,6 +289,13 @@ export async function generarInforme(
       body: JSON.stringify({
         study_instance_uid: studyInstanceUID,
         max_instances: maxInstances,
+        // v1.1 fields — undefined values are stripped by JSON.stringify,
+        // so existing callers passing no nota_clinica stay backward compatible.
+        ...(notaClinica !== undefined && notaClinica !== null && notaClinica.trim() !== ''
+          ? { nota_clinica: notaClinica.trim().slice(0, 500) }
+          : {}),
+        solicitar_auditoria: solicitarAuditoria,
+        ...(versionPipeline ? { version_pipeline: versionPipeline } : {}),
       }),
     },
     TIMEOUTS.GENERAR_INFORME // 2 minutos
@@ -277,7 +341,7 @@ export async function getInformesPorEstudio(
  */
 export async function listadoInformes(
   estado?: string
-): Promise<{ total: number; filtro_estado: string | null; informes: InformeDB[] }> {
+): Promise<{ total: number; filtro_estado: string | null; items: InformeDB[] }> {
   const query = estado ? `?estado=${encodeURIComponent(estado)}` : '';
   return apiRequest(`/informes/listado${query}`);
 }
@@ -344,6 +408,7 @@ async function apiV2Request<T>(
   try {
     const response = await fetch(url, {
       ...options,
+      credentials: 'include',
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',

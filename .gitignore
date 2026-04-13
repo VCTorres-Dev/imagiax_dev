@@ -4,6 +4,8 @@
 .env.local
 *.env.local
 *.env.*
+# Excepción: el template de ejemplo SÍ se versionea (no contiene secretos reales)
+!.env.example
 
 # SSH keys y certificados — NUNCA subir
 *.pem
@@ -61,8 +63,15 @@ app_imagiax.py
 app_imagiax_v6.py
 imagiax_core.py
 v2_experimental/
+archive/
 
-# Scripts de desarrollo/utilidad temporales
+# Scripts de desarrollo/utilidad temporales (movidos a scripts/)
+scripts/
+
+# Archivos de investigación/entrenamiento (movidos a research/)
+research/
+
+# Archivos de utilidad sueltos (compatibilidad con archivos no movidos aún)
 check_syntax*.py
 syntax_check*.py
 syntax_check*.bat
@@ -122,3 +131,11 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Cleanup additions (2026-04-07)
+# ML models directory (individual *.pth already listed above)
+models/
+# Compressed deploy archives
+*.tar.gz
+# Docs/images directory (individual image types already listed above)
+docs/images/

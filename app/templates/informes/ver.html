@@ -1,0 +1,54 @@
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% if not_found %}Informe no encontrado — IMAGIAX{% else %}Informe IMAGIAX — Verificación{% endif %}</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Inter',system-ui,sans-serif;
+background:#0a0f1e;color:#e2e8f0;min-height:100vh;{% if not_found %}display:flex;align-items:center;justify-content:center{% else %}padding:24px{% endif %}}
+.container{max-width:760px;margin:0 auto}
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;
+  padding-bottom:16px;border-bottom:1px solid #1e293b}
+.brand{font-size:20px;font-weight:800;color:#3b82f6;letter-spacing:-0.5px}
+.verified{display:flex;align-items:center;gap:6px;color:#22c55e;font-size:12px;font-weight:600}
+.card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:24px;margin-bottom:16px}
+.meta{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.meta-item label{display:block;font-size:10px;font-weight:600;color:#475569;
+  text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.meta-item span{font-size:14px;color:#e2e8f0;font-weight:500}
+.nivel{display:inline-block;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;
+  color:{{ nivel_color }};border:1px solid {{ nivel_color }};background:{{ nivel_color }}22}
+.informe-body{font-size:13px;line-height:1.8;color:#cbd5e1;white-space:pre-wrap;word-break:break-word}
+.footer{text-align:center;margin-top:24px;color:#334155;font-size:11px}
+.card-nf{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:40px;max-width:400px;text-align:center}
+h1.nf{font-size:20px;margin-bottom:12px;color:#f87171}p.nf{color:#64748b;font-size:14px}
+</style></head>
+<body>
+{% if not_found %}
+<div class="card-nf">
+  <h1 class="nf">Informe no encontrado</h1>
+  <p class="nf">El código QR no corresponde a ningún informe registrado en el sistema.</p>
+</div>
+{% else %}
+<div class="container">
+  <div class="header">
+    <div class="brand">IMAGIAX</div>
+    <div class="verified">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+      </svg>
+      Informe verificado
+    </div>
+  </div>
+  <div class="card">
+    <div class="meta">
+      <div class="meta-item"><label>Paciente</label><span>{{ paciente }}</span></div>
+      <div class="meta-item"><label>Fecha</label><span>{{ fecha }}</span></div>
+      <div class="meta-item"><label>Modalidad</label><span>{{ modalidad }}</span></div>
+      <div class="meta-item"><label>Estado</label><span>{{ estado_txt }}</span></div>
+      <div class="meta-item"><label>Nivel de alerta</label><span class="nivel">{{ nivel }}</span></div>
+    </div>
+    <div class="informe-body">{{ texto_html | safe }}</div>
+  </div>
+  <div class="footer">Generado por IMAGIAX AI &middot; ID: {{ informe_id[:8] }}...</div>
+</div>
+{% endif %}
+</body></html>
