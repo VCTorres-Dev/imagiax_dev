@@ -39,6 +39,26 @@ from app.ai.prompt_orchestrator import sanitize_dicom_text
 
 logger = logging.getLogger("imagiax.dicom")
 
+# ── DICOM tag null-like sanitization ──────────────────────────────────────────
+# Orthanc's /simplified-tags may return literal "null", "None", or "unknown"
+# strings when a DICOM tag is absent or has an empty value.  These leak into
+# prompts and PDFs as visible text (e.g. "Radiografía de Null").
+_NULL_LIKE = frozenset({"null", "none", "unknown", "undefined", ""})
+
+
+def clean_dicom_tag(value: Any) -> str | None:
+    """Return *None* when a DICOM tag value is semantically empty.
+
+    Catches: Python None, empty strings, and literal null-like strings
+    that PACS / Orthanc inject for missing tags.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s.lower() in _NULL_LIKE:
+        return None
+    return s
+
 # Image size expected by the NIH ResNet50-512 model
 IMG_SIZE: int = 512
 
@@ -301,25 +321,27 @@ async def analyze_single_instance(
     return {
         "orthanc_instance_id": orthanc_instance_id,
         "dicom": {
-            "StudyInstanceUID": tags.get("StudyInstanceUID"),
-            "SeriesInstanceUID": tags.get("SeriesInstanceUID"),
-            "SOPInstanceUID": tags.get("SOPInstanceUID"),
-            "Modality": tags.get("Modality"),
-            "ViewPosition": tags.get("ViewPosition"),
-            "BodyPartExamined": tags.get("BodyPartExamined"),
-            "StudyDate": tags.get("StudyDate"),
-            "PatientID": tags.get("PatientID"),
-            "PatientName": tags.get("PatientName"),
-            "PatientAge": tags.get("PatientAge"),
-            "PatientBirthDate": tags.get("PatientBirthDate"),
-            "AccessionNumber": tags.get("AccessionNumber"),
-            "InstanceNumber": tags.get("InstanceNumber"),
-            "SeriesDescription": tags.get("SeriesDescription"),
+            "StudyInstanceUID": clean_dicom_tag(tags.get("StudyInstanceUID")),
+            "SeriesInstanceUID": clean_dicom_tag(tags.get("SeriesInstanceUID")),
+            "SOPInstanceUID": clean_dicom_tag(tags.get("SOPInstanceUID")),
+            "Modality": clean_dicom_tag(tags.get("Modality")),
+            "ViewPosition": clean_dicom_tag(tags.get("ViewPosition")),
+            "BodyPartExamined": clean_dicom_tag(tags.get("BodyPartExamined")),
+            "StudyDate": clean_dicom_tag(tags.get("StudyDate")),
+            "PatientID": clean_dicom_tag(tags.get("PatientID")),
+            "PatientName": clean_dicom_tag(tags.get("PatientName")),
+            "PatientAge": clean_dicom_tag(tags.get("PatientAge")),
+            "PatientBirthDate": clean_dicom_tag(tags.get("PatientBirthDate")),
+            "AccessionNumber": clean_dicom_tag(tags.get("AccessionNumber")),
+            "InstanceNumber": clean_dicom_tag(tags.get("InstanceNumber")),
+            "SeriesDescription": clean_dicom_tag(tags.get("SeriesDescription")),
             # Enriched tags for prompt orchestrator classification
-            "PatientSex": tags.get("PatientSex") or "No especificado",
-            "StudyDescription": sanitize_dicom_text(tags.get("StudyDescription") or ""),
+            "PatientSex": clean_dicom_tag(tags.get("PatientSex")) or "No especificado",
+            "StudyDescription": sanitize_dicom_text(
+                clean_dicom_tag(tags.get("StudyDescription")) or ""
+            ),
             "RequestedProcedureDescription": sanitize_dicom_text(
-                tags.get("RequestedProcedureDescription") or ""
+                clean_dicom_tag(tags.get("RequestedProcedureDescription")) or ""
             ),
         },
         **inference,

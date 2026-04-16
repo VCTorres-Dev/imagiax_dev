@@ -28,6 +28,7 @@ from app.auth.dependencies import get_current_user
 from app.auth.models import UserPayload
 from app.core.database import get_db_pool
 from app.informes import db as informes_db
+from app.ai.dicom_service import clean_dicom_tag
 
 logger = logging.getLogger("imagiax.informes.router")
 
@@ -77,10 +78,10 @@ def _build_viewer_html(informe: dict) -> str:
         "rechazado": "Rechazado",
         "pendiente": "Pendiente",
     }.get(estado, estado)
-    paciente = informe.get("patient_name") or "—"
+    paciente = clean_dicom_tag(informe.get("patient_name")) or "—"
     fecha_raw = informe.get("created_at") or ""
     fecha = str(fecha_raw)[:10] if fecha_raw else "—"
-    modalidad = informe.get("modalidad") or "—"
+    modalidad = clean_dicom_tag(informe.get("modalidad")) or "—"
     informe_id = str(informe.get("id", ""))
     texto_html = _html.escape(texto).replace("\n", "<br>")
 

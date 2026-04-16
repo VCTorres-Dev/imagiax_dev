@@ -40,6 +40,15 @@ def generate_informe_pdf(informe: dict[str, Any]) -> bytes:
     informe_generado = (informe.get("informe_generado") or "").strip()
     informe_final = (informe.get("informe_final") or "").strip()
 
+    # Second-line defence: strip any XML tags that may have been stored in DB
+    # before the llm_service fix was deployed, or edited manually into informe_final.
+    import re as _re
+    _xml_re = _re.compile(r"<[^>]+>")
+    if "<" in informe_generado:
+        informe_generado = _re.sub(r"\n{3,}", "\n\n", _xml_re.sub("", informe_generado)).strip()
+    if "<" in informe_final:
+        informe_final = _re.sub(r"\n{3,}", "\n\n", _xml_re.sub("", informe_final)).strip()
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()

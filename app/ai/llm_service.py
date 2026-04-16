@@ -25,15 +25,36 @@ from typing import Any
 from fastapi import HTTPException
 from google import genai
 
-from app.ai.constants import NOMBRES_ES
+from app.ai.attention_booster import AttentionBooster
+from app.ai.clinical_audit_engine import (
+    BodyPart,
+    ChestSignal,
+    ClinicalAuditEngine,
+    classify_chest_signal,
+    resolve_body_part,
+)
+from app.ai.constants import NOMBRES_ES, strip_xml_tags
 from app.ai.dicom_service import dicom_to_png_bytes
 from app.ai.prompt_orchestrator import assemble_prompt
 from app.core.config import settings
 
+# ── Backward-compatible alias (internal uses reference _strip_xml_tags) ───────
+_strip_xml_tags = strip_xml_tags
+
+# ── Singleton del motor de auditoría clínica ─────────────────────────────────
+_audit_engine = ClinicalAuditEngine()
+
+# ── Singleton del Attention Booster (v15) ────────────────────────────────────
+_attention_booster = AttentionBooster()
+
 logger = logging.getLogger("imagiax.llm")
 
-# ── LLM model name (constant; can be overridden via settings.GEMINI_MODEL) ────
+
+# ── LLM model names ───────────────────────────────────────────────────────────
+# Quality gate, auditor regen, etc. stay on flash (fast, cheap, sufficient).
 LLM_MODEL: str = settings.GEMINI_MODEL
+# Report generation uses Pro for higher diagnostic accuracy.
+LLM_GENERATION_MODEL: str = settings.GEMINI_PRO_MODEL
 
 # ── Singleton Gemini client ───────────────────────────────────────────────────
 _gemini_client: genai.Client | None = None
@@ -185,6 +206,7 @@ def _generar_informe_fallback(
 # ============================================================
 
 
+
 async def generar_informe_llm(
     *,
     ai_resultados: dict[str, Any],
@@ -198,6 +220,7 @@ async def generar_informe_llm(
     custom_system_instruction: str | None = None,
     custom_prompt: str | None = None,
     nota_clinica: str | None = None,
+    override_model: str | None = None,
 ) -> tuple[str, bool]:
     """Generate a structured Spanish radiological report using Gemini Vision.
 
@@ -226,18 +249,57 @@ async def generar_informe_llm(
     hallazgos = ai_resultados.get("hallazgos_estudio", [])
     nivel_alerta = ai_resultados.get("nivel_alerta", ai_resultados.get("ai_nivel_alerta", "NORMAL"))
 
-    hallazgos_positivos = [h for h in hallazgos if h.get("probabilidad_pct_max", 0) >= 50]
     hallazgos_leves: list[dict[str, Any]] = []
 
-    if hallazgos_positivos:
+    # ── Clasificación pre-generación usando ClinicalAuditEngine (v2.0 Global) ─
+    # classify_chest_signal() es una función pura que encapsula toda la lógica
+    # de distinción PATHOLOGICAL / GENERIC_SIGNAL / NORMAL.
+    # Elimina las variables locales _ETIQUETAS_GENERICAS / _solo_genericos que
+    # vivían aquí antes de la migración v2.0.
+    _chest_signal = classify_chest_signal(ai_resultados)
+
+    # Hallazgos positivos (≥50%) — sólo para construir el texto del prompt
+    hallazgos_positivos = [h for h in hallazgos if h.get("probabilidad_pct_max", 0) >= 50]
+    _solo_genericos = (_chest_signal == ChestSignal.GENERIC_SIGNAL)
+
+    if _chest_signal == ChestSignal.PATHOLOGICAL:
+        # ResNet confirmó patología grave — Gemini puede reportar libremente
         hallazgos_confirmados_txt = "\n".join(
             f"  - {nombre_es_patologia(h['patologia'])} (CONFIRMADO — hallazgo principal)"
             for h in hallazgos_positivos
         )
+    elif _chest_signal == ChestSignal.GENERIC_SIGNAL:
+        # Señal inespecífica (Lung Opacity, Atelectasis, Infiltration) sin patología grave.
+        # Cuasi-normal: opacidades menores posibles, sin patología aguda mayor.
+        _generico_nombres = ", ".join(
+            nombre_es_patologia(h["patologia"]) for h in hallazgos_positivos
+        )
+        hallazgos_confirmados_txt = (
+            f"  - Señal inespecífica detectada: {_generico_nombres} — "
+            "compatible con atelectasia laminar, opacidades retrocardiacas menores o artefacto técnico.\n\n"
+            "  ⚠ RESTRICCIÓN ACTIVA: Esta señal es INESPECÍFICA y NO confirma patología aguda.\n"
+            "  Tu hipótesis de trabajo ES que el estudio es NORMAL con posibles hallazgos MENORES.\n"
+            "  Podés describir opacidades retrocardiacas sutiles o atelectasias laminares.\n"
+            "  NO reportés consolidación lobar, derrame pleural mayor, neumotórax ni patología\n"
+            "  pulmonar crónica (EPI, fibrosis, patrón intersticial) a menos que sea IMPOSIBLE\n"
+            "  de ignorar visualmente."
+        )
     else:
+        # ChestSignal.NORMAL o ChestSignal.NOT_APPLICABLE — hipótesis de normalidad
         hallazgos_confirmados_txt = (
             "  - Ningún hallazgo patológico significativo confirmado "
-            "(estudio dentro de límites normales)"
+            "(estudio dentro de límites normales)\n\n"
+            "  ⚠ RESTRICCIÓN ACTIVA: El modelo de visión especializado no detectó patología.\n"
+            "  Tu hipótesis de trabajo ES que el estudio es NORMAL. Solo invalidás esa hipótesis\n"
+            "  si hay evidencia IMPOSIBLE de ignorar (neumotórax total, consolidación lobar densa,\n"
+            "  derrame masivo con shift mediastinal, fractura desplazada). Hallazgos sutiles\n"
+            "  o intermedios NO invalidan la hipótesis de normalidad.\n\n"
+            "  ✅ EXCEPCIÓN PERMITIDA: Podés y DEBÉS reportar hallazgos extraparenquimatosos crónicos\n"
+            "  si los ves en la imagen: calcificaciones vasculares (cayado aórtico, aorta),\n"
+            "  ateromatosis aórtica, elongación aórtica, cambios degenerativos vertebrales,\n"
+            "  osteofitos, refuerzo/aumento de trama peribroncovascular hiliar bilateral,\n"
+            "  prominencia hiliar descriptiva (sin diagnóstico causal).\n"
+            "  ESTOS HALLAZGOS SON CLÍNICAMENTE RELEVANTES — NO los suprimas."
         )
 
     hallazgos_leves_bloque = ""
@@ -300,14 +362,18 @@ INSTRUCCIONES:
      - Si la estructura se ve normal → "de aspecto habitual", "sin alteraciones evidentes", "libres".
      - Si la estructura se ve anormal → descríbela tal cual la ves, SIN diagnóstico, y agrégala también en OBSERVACIONES.
 
-2. SECCIÓN OBSERVACIONES VISUALES ADICIONALES — Hallazgos visuales NO confirmados por el algoritmo.
-   El análisis cuantitativo solo detecta 18 patologías parenquimatosas. NO detecta:
-   elongación/ateromatosis aórtica, hernia hiatal, engrosamiento intersticial difuso,
-   escoliosis, cambios degenerativos, dispositivos médicos, nódulos pequeños, ni otros hallazgos incidentales.
-   Si al examinar la imagen en la sección anterior encontraste CUALQUIER anomalía visual
-   que no está en la lista confirmada, repórtala aquí como:
-   "Se observa [descripción morfológica]. Hallazgo a correlacionar clínicamente."
-   Si no hay nada adicional: "Sin observaciones adicionales."
+2. SECCIÓN OBSERVACIONES VISUALES ADICIONALES — Hallazgos extraparenquimatosos reales.
+   Esta sección es SIEMPRE activa para hallazgos extraparenquimatosos crónicos objetivos:
+   - Calcificaciones vasculares (cayado aórtico, coronarias visibles, aorta)
+   - Ateromatosis aórtica (elongación, ectasia, densificación parietal)
+   - Cambios degenerativos vertebrales (osteofitos, discopatías evidentes)
+   - Aumento de trama peribroncovascular hiliar bilateral (si es visible)
+   - Prominencia hiliar (si es objetiva)
+   - Hernia hiatal con nivel hidroaéreo
+   - Dispositivos médicos visibles
+   Si ninguno de estos hallazgos está presente → escribí: "Sin observaciones adicionales."
+   Si reportás algo aquí, usá lenguaje morfológico objetivo: "Se observa [descripción]. Hallazgo a correlacionar clínicamente."
+   NUNCA uses esta sección para agregar patología parenquimatosa pulmonar que el análisis cuantitativo no confirmó.
 
 FORMATO OBLIGATORIO — estos encabezados exactos:
 
@@ -320,6 +386,10 @@ HALLAZGOS
 
 IMPRESIÓN DIAGNÓSTICA
 Resumen clínico conciso. Incluye hallazgos confirmados + cualquier observación visual relevante.
+REGLA: Si detectás hallazgos crónicos (calcificaciones vasculares, hilios prominentes, osteofitos
+significativos, trama peribroncovascular aumentada), tu impresión DEBE sugerir correlación
+con el cuadro clínico. Si la combinación de hallazgos genera duda diagnóstica, recomendá
+TACAR o estudio de segunda línea según corresponda.
 
 OBSERVACIONES VISUALES ADICIONALES
 Anomalías visuales no confirmadas por el algoritmo (como se describe en instrucción 2).
@@ -337,21 +407,49 @@ REGLAS:
             "Redactas informes radiológicos completos en español. "
             "Realizas una revisión sistemática de TODAS las estructuras torácicas en cada imagen. "
             "Describes lo que ves de forma objetiva y morfológica. "
-            "El análisis cuantitativo automatizado solo cubre 18 patologías parenquimatosas. "
-            "Tú eres responsable de detectar visualmente todo lo que el algoritmo no cubre: "
-            "cambios vasculares, hernias, cambios intersticiales difusos, fracturas sutiles, "
-            "dispositivos, cambios degenerativos, y cualquier otro hallazgo incidental. "
             "NUNCA mencionas inteligencia artificial, algoritmos, modelos ni probabilidades. "
-            "El informe comienza directamente con TÉCNICA."
+            "El informe comienza directamente con TÉCNICA. "
+            "REGLA MAESTRA: Tu punto de partida es SIEMPRE que el estudio es normal. "
+            "Para reportar un hallazgo patológico necesitás evidencia visual DIRECTA, CLARA "
+            "e INEQUÍVOCA. Si un hallazgo requiere 'buscar activamente' o 'interpretar' una "
+            "señal débil, NO existe. Lo omitís. "
+            "CUANDO EL ANÁLISIS DICE 'SIN HALLAZGOS': eso es una RESTRICCIÓN. "
+            "Tu informe DEBE ser consistente con un estudio normal. Solo reportás hallazgos "
+            "que son VISUALMENTE IMPOSIBLES de ignorar. NUNCA reportás hallazgos sutiles "
+            "o intermedios cuando el análisis cuantitativo dice normal."
         )
+
+        # ── CTA: Puerta Lógica Semántica (v13) ────────────────────────────────
+        # Si la señal de ResNet es inespecífica (Lung Opacity alta pero sin específicas),
+        # inyectamos en el system_instruction una restricción de vocabulario diagnóstico.
+        # El modelo puede describir morfología pero NO puede emitir diagnósticos agudos.
+        if _solo_genericos:
+            _cta_bloque = (
+                " "
+                "PUERTA SEMÁNTICA ACTIVA (análisis cuantitativo v13): "
+                "El algoritmo de visión detectó señal de opacidad inespecífica pero confirmó "
+                "AUSENCIA de patología específica (consolidación, neumonía, derrame, etc.). "
+                "VOCABULARIO DIAGNÓSTICO PROHIBIDO: no podés usar 'neumonía', 'consolidación', "
+                "'derrame pleural', 'infiltrado', 'proceso neumónico', 'edema', 'EPI', 'fibrosis', "
+                "'patrón intersticial', 'bronquiectasias' ni ningún término diagnóstico de patología "
+                "aguda o crónica activa para el parénquima pulmonar. "
+                "VOCABULARIO PERMITIDO para describir la opacidad: "
+                "'opacidad inespecífica', 'imagen de carácter no consolidativo', "
+                "'atelectasia laminar', 'banda atelectásica', 'opacidad retrocardiaca de aspecto atelectásico', "
+                "'tenues opacidades', 'leve aumento de densidad'. "
+                "Describís morfología, no diagnósticos."
+            )
+            system_instruction = system_instruction + _cta_bloque
 
     # ── Inject nota_clinica into prompt (v1.0 legacy path) ─────────────────────
     # In v1.1 the router already injected the note via inject_clinical_note().
     # For v1.0 (custom_prompt was None -> legacy prompt built above), use
     # the same strong injection from prompt_orchestrator.
     if nota_clinica and nota_clinica.strip():
-        from app.ai.prompt_orchestrator import inject_clinical_note as _inject_note
-        prompt = _inject_note(prompt, nota_clinica)
+        # Avoid double injection — check if nota was already injected via template placeholder
+        if nota_clinica.strip()[:80] not in prompt:
+            from app.ai.prompt_orchestrator import inject_clinical_note as _inject_note
+            prompt = _inject_note(prompt, nota_clinica)
 
     # ── Gemini Vision: attach DICOM images if available ───────────────────────
     _loop = asyncio.get_running_loop()
@@ -393,27 +491,141 @@ REGLAS:
         contents = [prompt]
 
     client = get_gemini_client()
+    _active_model = override_model if override_model else LLM_GENERATION_MODEL
+    if override_model:
+        logger.info("LLM model override active: %s (default: %s)", override_model, LLM_GENERATION_MODEL)
 
     # ── Retry with exponential back-off (handles 429 and transient 5xx) ───────
     # Per-attempt timeout: 60 s. Worst-case total: 4 × 60 + 35 (backoff: 5+10+20) = 275 s.
     # Ensure PIPELINE_GLOBAL_TIMEOUT (config) is set > 275 s to avoid premature pipeline
     # cancellation before all retries are exhausted.
+    def _check_truncated(resp: Any) -> bool:
+        """Return True if Gemini stopped because MAX_TOKENS was reached."""
+        if not resp.candidates:
+            return False
+        finish_reason = getattr(resp.candidates[0], "finish_reason", None)
+        if finish_reason is None:
+            return False
+        reason_val = finish_reason.value if hasattr(finish_reason, "value") else finish_reason
+        return reason_val == 2  # FinishReason.MAX_TOKENS
+
     last_exc: Exception | None = None
     for _attempt in range(4):  # attempts: 0, 1, 2, 3
+        # Temperatura 0.2 en el primer intento para mayor sensibilidad morfológica.
+        # Reintentos (por error técnico) usan temperature=None (default del modelo).
+        _temperature: float | None = 0.2 if _attempt == 0 else None
         try:
             response = await asyncio.wait_for(
                 client.aio.models.generate_content(
-                    model=LLM_MODEL,
+                    model=_active_model,
                     contents=contents,
                     config=genai.types.GenerateContentConfig(
                         system_instruction=system_instruction,
-                        temperature=0.1,
-                        max_output_tokens=4096,
+                        temperature=_temperature,
+                        max_output_tokens=8192,
+                        thinking_config=genai.types.ThinkingConfig(thinking_budget=-1),
                     ),
                 ),
                 timeout=60.0,
             )
-            return response.text or "", False
+
+            # ── Log token usage ──────────────────────────────────────────────
+            if hasattr(response, "usage_metadata"):
+                usage = response.usage_metadata
+                logger.info(
+                    "Token usage — prompt: %s, candidates: %s, thoughts: %s",
+                    getattr(usage, "prompt_token_count", "?"),
+                    getattr(usage, "candidates_token_count", "?"),
+                    getattr(usage, "thoughts_token_count", "?"),
+                )
+
+            # ── Truncation detection & one-shot retry with 16384 tokens ─────
+            was_truncated = _check_truncated(response)
+            if was_truncated:
+                logger.warning(
+                    "Report truncated (finish_reason=MAX_TOKENS) on attempt %d/4, "
+                    "retrying with 16384 tokens",
+                    _attempt + 1,
+                )
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=_active_model,
+                        contents=contents,
+                        config=genai.types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            temperature=None,
+                            max_output_tokens=16384,
+                            thinking_config=genai.types.ThinkingConfig(thinking_budget=-1),
+                        ),
+                    ),
+                    timeout=60.0,
+                )
+                if hasattr(response, "usage_metadata"):
+                    usage = response.usage_metadata
+                    logger.info(
+                        "Token usage (retry-16k) — prompt: %s, candidates: %s, thoughts: %s",
+                        getattr(usage, "prompt_token_count", "?"),
+                        getattr(usage, "candidates_token_count", "?"),
+                        getattr(usage, "thoughts_token_count", "?"),
+                    )
+                was_truncated = _check_truncated(response)
+                if was_truncated:
+                    logger.error(
+                        "Report STILL truncated after retry with 16384 tokens (patient: %s)",
+                        patient_id,
+                    )
+
+            report_text = _strip_xml_tags(response.text or "")
+
+            # ── AttentionBooster v15 (PCCR — solo MSK/Pelvis) ─────────────────
+            # Activa solo para SKELETAL y PELVIS. Para tórax: INACTIVO.
+            # Fase 2: zoom cognitivo en interfases articulares y entesis.
+            # Fase 3: filtro de persistencia — solo pasan hallazgos confirmados.
+            _body_part = resolve_body_part(
+                exam_region=ai_resultados.get("exam_region"),
+                template_id=ai_resultados.get("template_id"),
+                custom_system_instruction=custom_system_instruction,
+                modalidad=modalidad,
+            )
+            if _attention_booster.should_activate(_body_part):
+                try:
+                    report_text, _was_boosted = await _attention_booster.run(
+                        draft_report=report_text,
+                        dicom_images=dicom_images,
+                        gemini_client=client,
+                        body_part=_body_part,
+                        proyecciones_txt=proyecciones_txt,
+                    )
+                    if _was_boosted:
+                        logger.info(
+                            "[BOOSTER] Report enriched for patient %s (body_part=%s).",
+                            patient_id, _body_part.value,
+                        )
+                except Exception as _booster_exc:
+                    # Booster failure is non-fatal — draft report is preserved.
+                    logger.warning(
+                        "[BOOSTER] Unexpected error for patient %s: %s — using draft.",
+                        patient_id, _booster_exc,
+                    )
+
+            # ── ClinicalAuditEngine (v2.0 Global) ─────────────────────────────
+            # _body_part ya fue resuelto en el bloque AttentionBooster de arriba.
+            # Lo reutilizamos directamente — no hay segunda llamada a resolve_body_part.
+            report_text, _fue_intervenido = await _audit_engine.validate(
+                report=report_text,
+                ai_results=ai_resultados,
+                body_part=_body_part,
+                gemini_client=client,
+                proyecciones_txt=proyecciones_txt,
+            )
+            if _fue_intervenido:
+                logger.info(
+                    "[AUDIT] Informe intervenido para paciente %s — body_part=%s.",
+                    patient_id, _body_part.value,
+                )
+            # ─────────────────────────────────────────────────────────────────
+
+            return report_text, was_truncated
 
         except asyncio.TimeoutError:
             last_exc = TimeoutError(
@@ -453,3 +665,175 @@ REGLAS:
         patient_age=patient_age,
     )
     return fallback_text, True
+
+
+# ============================================================
+# Two-pass report generation (anti-hallucination for chest X-ray)
+# ============================================================
+
+_TWO_PASS_OBSERVATION_SYSTEM = (
+    "Sos un médico radiólogo con 20 años de experiencia. "
+    "Tu única tarea en este momento es OBSERVAR la imagen radiológica y listar "
+    "hallazgos visuales directos — morfológicos, objetivos. "
+    "NO hagas diagnósticos, NO sintetices, NO interpoles. Solo describí lo que ves."
+)
+
+_TWO_PASS_OBSERVATION_PROMPT = (
+    "Mirá la imagen radiológica adjunta. "
+    "Listá SOLAMENTE los hallazgos visuales que ves con ALTA CERTEZA morfológica. "
+    "Máximo 8 ítems. Formato: un ítem por línea, empezando con '-'. "
+    "Reglas estrictas:\n"
+    "- Solo describí estructuras que podés VER claramente en la imagen.\n"
+    "- Si una estructura se ve NORMAL, escribí: '- [estructura]: aspecto normal'\n"
+    "- Si una estructura se ve ANORMAL, describí el hallazgo morfológico puntual.\n"
+    "- NO uses palabras como 'sugiere', 'podría', 'probable', 'compatible con'.\n"
+    "- NO describas lo que NO ves o lo que no está en la imagen.\n"
+    "- NO hagas conclusiones diagnósticas todavía.\n"
+    "Empezá directamente con el primer ítem '-'. Sin introducción."
+)
+
+
+async def generar_informe_llm_two_pass(
+    *,
+    ai_resultados: dict[str, Any],
+    patient_id: str | None,
+    patient_name: str | None,
+    study_date: str | None,
+    modalidad: str | None,
+    dicom_images: list[bytes] | None = None,
+    proyecciones_txt: str = "estándar",
+    patient_age: str | None = None,
+    custom_system_instruction: str | None = None,
+    custom_prompt: str | None = None,
+    nota_clinica: str | None = None,
+) -> tuple[str, bool]:
+    """Two-pass report generation: observe first, report second.
+
+    Pass 1: Ask Gemini to list ONLY direct visual morphological observations
+            (no diagnoses, no inferences). Max 8 bullet points.
+    Pass 2: Ask Gemini to write the full radiological report using ONLY the
+            observations from Pass 1 as visual ground truth.
+
+    This separates observation from interpretation, cutting the hallucination
+    loop where the model invents pathology to justify a narrative.
+
+    Returns ``(report_text, is_fallback)``.
+    Falls back to single-pass ``generar_informe_llm()`` on any Pass 1 failure.
+    """
+    client = get_gemini_client()
+    _loop = asyncio.get_running_loop()
+
+    # ── Build image parts (shared for both passes) ────────────────────────────
+    image_parts: list[Any] = []
+    if dicom_images:
+        for raw_bytes in dicom_images:
+            try:
+                png_bytes = await _loop.run_in_executor(None, dicom_to_png_bytes, raw_bytes)
+                image_parts.append(
+                    genai.types.Part.from_bytes(data=png_bytes, mime_type="image/png")
+                )
+            except Exception as _img_err:
+                logger.warning("[TWO-PASS] DICOM→PNG conversion failed: %s", _img_err)
+
+    # ── Pass 1: Observation only ──────────────────────────────────────────────
+    observations_text: str | None = None
+    try:
+        n_imgs = len(image_parts)
+        if n_imgs == 0:
+            obs_prefix = ""
+        elif n_imgs == 1:
+            obs_prefix = "Se adjunta 1 imagen radiológica.\n\n"
+        elif n_imgs == 2:
+            obs_prefix = (
+                "Se adjuntan 2 imágenes: la PRIMERA es la proyección posteroanterior (PA), "
+                "la SEGUNDA es la lateral (LAT).\n\n"
+            )
+        else:
+            obs_prefix = (
+                f"Se adjuntan {n_imgs} imágenes del mismo estudio radiológico.\n\n"
+            )
+
+        pass1_contents: list[Any] = image_parts + [obs_prefix + _TWO_PASS_OBSERVATION_PROMPT]
+
+        logger.info("[TWO-PASS][PASS-1] Starting observation pass (patient: %s)", patient_id)
+        pass1_response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=LLM_GENERATION_MODEL,
+                contents=pass1_contents,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=_TWO_PASS_OBSERVATION_SYSTEM,
+                    temperature=None,
+                    max_output_tokens=1024,
+                    thinking_config=genai.types.ThinkingConfig(thinking_budget=-1),
+                ),
+            ),
+            timeout=60.0,
+        )
+        observations_text = (pass1_response.text or "").strip()
+        if hasattr(pass1_response, "usage_metadata"):
+            usage = pass1_response.usage_metadata
+            logger.info(
+                "[TWO-PASS][PASS-1] Token usage — prompt: %s, candidates: %s, thoughts: %s",
+                getattr(usage, "prompt_token_count", "?"),
+                getattr(usage, "candidates_token_count", "?"),
+                getattr(usage, "thoughts_token_count", "?"),
+            )
+        logger.info(
+            "[TWO-PASS][PASS-1] Observations (%d chars):\n%s",
+            len(observations_text),
+            observations_text[:800],
+        )
+    except Exception as _p1_exc:
+        logger.warning(
+            "[TWO-PASS][PASS-1] Failed, falling back to single-pass: %s", _p1_exc
+        )
+        return await generar_informe_llm(
+            ai_resultados=ai_resultados,
+            patient_id=patient_id,
+            patient_name=patient_name,
+            study_date=study_date,
+            modalidad=modalidad,
+            dicom_images=dicom_images,
+            proyecciones_txt=proyecciones_txt,
+            patient_age=patient_age,
+            custom_system_instruction=custom_system_instruction,
+            custom_prompt=custom_prompt,
+            nota_clinica=nota_clinica,
+        )
+
+    # ── Pass 2: Report generation anchored to Pass 1 observations ────────────
+    # Inject the observations as a hard constraint block into the YAML prompt.
+    observations_block = (
+        "\n\n"
+        "══════════════════════════════════════════════════════════════\n"
+        "OBSERVACIONES VISUALES DIRECTAS (fuente de verdad para este informe)\n"
+        "Las siguientes observaciones fueron extraídas directamente de la imagen "
+        "en un paso previo de análisis morfológico puro:\n\n"
+        f"{observations_text}\n\n"
+        "REGLA CRÍTICA: El informe DEBE basarse ÚNICAMENTE en estas observaciones. "
+        "NO agregues hallazgos que no estén en esta lista. "
+        "Si una estructura no aparece en la lista como anormal, describila como 'de aspecto habitual'.\n"
+        "══════════════════════════════════════════════════════════════\n"
+    )
+
+    # Inject into the custom_prompt (YAML template) before the final report instruction
+    pass2_custom_prompt: str | None = None
+    if custom_prompt:
+        pass2_custom_prompt = custom_prompt + observations_block
+    else:
+        pass2_custom_prompt = None  # will use legacy path in generar_informe_llm
+
+    logger.info("[TWO-PASS][PASS-2] Starting report generation pass (patient: %s)", patient_id)
+    return await generar_informe_llm(
+        ai_resultados=ai_resultados,
+        patient_id=patient_id,
+        patient_name=patient_name,
+        study_date=study_date,
+        modalidad=modalidad,
+        dicom_images=dicom_images,  # images still sent for visual context
+        proyecciones_txt=proyecciones_txt,
+        patient_age=patient_age,
+        custom_system_instruction=custom_system_instruction,
+        custom_prompt=pass2_custom_prompt,
+        nota_clinica=nota_clinica,
+    )

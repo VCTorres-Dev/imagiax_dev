@@ -46,6 +46,7 @@ from app.ai.dicom_service import (
     NIH_PATOLOGIAS,
     UMBRALES,
     analyze_single_instance,
+    clean_dicom_tag,
     dicom_to_tensor,
     infer_multilabel,
 )
@@ -66,7 +67,10 @@ from app.ai.prompt_orchestrator import (
     assemble_prompt,
     sanitize_dicom_text,
     inject_clinical_note,
+    inject_additional_metadata,
     sanitize_nota_clinica,
+    validate_patient_age,
+    sanitize_demographic_context,
     ExamType,
     ExamRegion,
     ExamModality,
@@ -349,6 +353,7 @@ async def _analyze_from_bytes(
     )
 
     from app.ai.prompt_orchestrator import sanitize_dicom_text as _sanitize
+    from app.ai.dicom_service import clean_dicom_tag as _clean_tag
 
     return {
         "orthanc_instance_id": oid,
@@ -358,24 +363,24 @@ async def _analyze_from_bytes(
         # API response (JSONResponse serialization strips unknown keys).
         "_raw_dicom_bytes": dicom_bytes,
         "dicom": {
-            "StudyInstanceUID": tags.get("StudyInstanceUID"),
-            "SeriesInstanceUID": tags.get("SeriesInstanceUID"),
-            "SOPInstanceUID": tags.get("SOPInstanceUID"),
-            "Modality": tags.get("Modality"),
-            "ViewPosition": tags.get("ViewPosition"),
-            "BodyPartExamined": tags.get("BodyPartExamined"),
-            "StudyDate": tags.get("StudyDate"),
-            "PatientID": tags.get("PatientID"),
-            "PatientName": tags.get("PatientName"),
-            "PatientAge": tags.get("PatientAge"),
-            "PatientBirthDate": tags.get("PatientBirthDate"),
-            "AccessionNumber": tags.get("AccessionNumber"),
-            "InstanceNumber": tags.get("InstanceNumber"),
-            "SeriesDescription": tags.get("SeriesDescription"),
-            "PatientSex": tags.get("PatientSex") or "No especificado",
-            "StudyDescription": _sanitize(tags.get("StudyDescription") or ""),
+            "StudyInstanceUID": _clean_tag(tags.get("StudyInstanceUID")),
+            "SeriesInstanceUID": _clean_tag(tags.get("SeriesInstanceUID")),
+            "SOPInstanceUID": _clean_tag(tags.get("SOPInstanceUID")),
+            "Modality": _clean_tag(tags.get("Modality")),
+            "ViewPosition": _clean_tag(tags.get("ViewPosition")),
+            "BodyPartExamined": _clean_tag(tags.get("BodyPartExamined")),
+            "StudyDate": _clean_tag(tags.get("StudyDate")),
+            "PatientID": _clean_tag(tags.get("PatientID")),
+            "PatientName": _clean_tag(tags.get("PatientName")),
+            "PatientAge": _clean_tag(tags.get("PatientAge")),
+            "PatientBirthDate": _clean_tag(tags.get("PatientBirthDate")),
+            "AccessionNumber": _clean_tag(tags.get("AccessionNumber")),
+            "InstanceNumber": _clean_tag(tags.get("InstanceNumber")),
+            "SeriesDescription": _clean_tag(tags.get("SeriesDescription")),
+            "PatientSex": _clean_tag(tags.get("PatientSex")) or "No especificado",
+            "StudyDescription": _sanitize(_clean_tag(tags.get("StudyDescription")) or ""),
             "RequestedProcedureDescription": _sanitize(
-                tags.get("RequestedProcedureDescription") or ""
+                _clean_tag(tags.get("RequestedProcedureDescription")) or ""
             ),
         },
         **inference,
@@ -702,7 +707,8 @@ async def _run_ai_analysis(
     _first_tags: dict[str, Any] = {}
     if instance_ids:
         try:
-            _first_tags = await get_instance_tags(orthanc, instance_ids[0])
+            _raw_first_tags = await get_instance_tags(orthanc, instance_ids[0])
+            _first_tags = {k: clean_dicom_tag(v) for k, v in _raw_first_tags.items()}
             _first_ctx = extract_patient_context(_first_tags)
             _bp = (_first_ctx.body_part_examined or "").upper().strip()
             _mod = (_first_ctx.modality_raw or "").upper().strip()
@@ -776,26 +782,26 @@ async def _run_ai_analysis(
                 {
                     "orthanc_instance_id": _oid,
                     "dicom": {
-                        "StudyInstanceUID": _tags.get("StudyInstanceUID"),
-                        "SeriesInstanceUID": _tags.get("SeriesInstanceUID"),
-                        "SOPInstanceUID": _tags.get("SOPInstanceUID"),
-                        "Modality": _tags.get("Modality"),
-                        "ViewPosition": _tags.get("ViewPosition"),
-                        "BodyPartExamined": _tags.get("BodyPartExamined"),
-                        "StudyDate": _tags.get("StudyDate"),
-                        "PatientID": _tags.get("PatientID"),
-                        "PatientName": _tags.get("PatientName"),
-                        "PatientAge": _tags.get("PatientAge"),
-                        "PatientBirthDate": _tags.get("PatientBirthDate"),
-                        "AccessionNumber": _tags.get("AccessionNumber"),
-                        "InstanceNumber": _tags.get("InstanceNumber"),
-                        "SeriesDescription": _tags.get("SeriesDescription"),
-                        "PatientSex": _tags.get("PatientSex") or "No especificado",
+                        "StudyInstanceUID": clean_dicom_tag(_tags.get("StudyInstanceUID")),
+                        "SeriesInstanceUID": clean_dicom_tag(_tags.get("SeriesInstanceUID")),
+                        "SOPInstanceUID": clean_dicom_tag(_tags.get("SOPInstanceUID")),
+                        "Modality": clean_dicom_tag(_tags.get("Modality")),
+                        "ViewPosition": clean_dicom_tag(_tags.get("ViewPosition")),
+                        "BodyPartExamined": clean_dicom_tag(_tags.get("BodyPartExamined")),
+                        "StudyDate": clean_dicom_tag(_tags.get("StudyDate")),
+                        "PatientID": clean_dicom_tag(_tags.get("PatientID")),
+                        "PatientName": clean_dicom_tag(_tags.get("PatientName")),
+                        "PatientAge": clean_dicom_tag(_tags.get("PatientAge")),
+                        "PatientBirthDate": clean_dicom_tag(_tags.get("PatientBirthDate")),
+                        "AccessionNumber": clean_dicom_tag(_tags.get("AccessionNumber")),
+                        "InstanceNumber": clean_dicom_tag(_tags.get("InstanceNumber")),
+                        "SeriesDescription": clean_dicom_tag(_tags.get("SeriesDescription")),
+                        "PatientSex": clean_dicom_tag(_tags.get("PatientSex")) or "No especificado",
                         "StudyDescription": sanitize_dicom_text(
-                            _tags.get("StudyDescription") or ""
+                            clean_dicom_tag(_tags.get("StudyDescription")) or ""
                         ),
                         "RequestedProcedureDescription": sanitize_dicom_text(
-                            _tags.get("RequestedProcedureDescription") or ""
+                            clean_dicom_tag(_tags.get("RequestedProcedureDescription")) or ""
                         ),
                     },
                     "nivel_alerta": "NORMAL",
@@ -888,13 +894,35 @@ async def _build_template_context(
         proyecciones_txt = "estándar"
 
     # Build age context block for template routing
-    _edad_txt_routing = ""
+    # v15: DemographicSanitizer — replaces raw validate_patient_age call.
+    # NOTE: patient_age is already precisely calculated from PatientBirthDate+StudyDate
+    # (e.g. "10Y11M"), so we override ctx.age with it — otherwise extract_patient_context
+    # reads the raw PatientAge tag ("010Y") which is truncated to whole years.
+    _validated_age = patient_age or ""
+    _age_hint = ""
     if patient_age:
-        _age_match = re.search(r"(\d+)", str(patient_age))
-        if _age_match:
-            _edad_num = int(_age_match.group(1))
+        _age_ctx_for_validation = extract_patient_context(first_tags)
+        _age_ctx_for_validation.age = patient_age  # Use our precise calculated age
+        _demo_result = sanitize_demographic_context(_age_ctx_for_validation)
+        _validated_age = _demo_result.age
+        _age_hint = _demo_result.age_hint
+        for _w in _demo_result.warnings:
+            logger.warning("[DEMOGRAPHIC-SANITIZER][build_template_context] %s", _w)
+
+    _edad_txt_routing = _age_hint  # inject anomaly hint even when age is empty
+    if _validated_age:
+        # Parse compound age format e.g. "10Y11M", "010Y", "6M", etc.
+        _age_compound_match = re.match(r"^(\d+)Y(?:(\d+)M)?$", str(_validated_age).strip().upper())
+        if _age_compound_match:
+            _edad_num = int(_age_compound_match.group(1))
+            _edad_m = int(_age_compound_match.group(2)) if _age_compound_match.group(2) else 0
+            # Build human-readable age label in Spanish
+            if _edad_m > 0:
+                _edad_label = f"{_edad_num} años {_edad_m} meses"
+            else:
+                _edad_label = f"{_edad_num} años"
             _edad_txt_routing = (
-                "\nEDAD DEL PACIENTE: " + str(_edad_num) + " años. "
+                "\nEDAD DEL PACIENTE: " + _edad_label + ". "
                 "Calibra tus hallazgos según la edad: en pacientes jóvenes (<40 años) "
                 "NO esperes elongación aórtica ni ateromatosis; en pacientes mayores (>60 años) "
                 "estos hallazgos son frecuentes y clínicamente relevantes.\n"
@@ -1194,19 +1222,30 @@ async def generar_informe(
     patient_name = dicom_meta.get("PatientName")
     study_date = dicom_meta.get("StudyDate")
     modalidad = dicom_meta.get("Modality")
-    patient_age: str | None = dicom_meta.get("PatientAge") or None
+    # FIX: Always prefer precise age from PatientBirthDate+StudyDate when both available.
+    # PatientAge DICOM tag (VR=AS) is stored rounded to whole years by most modalities
+    # (e.g., 10y11m → "010Y"), which inverts bone age discrepancy in pediatric cases.
+    _birth_date_str = (dicom_meta.get("PatientBirthDate") or "").strip()
+    _study_date_str = ((study_date or "") if isinstance(study_date, str) else str(study_date or ""))[:8].strip()
+    patient_age: str | None = None
+    if len(_birth_date_str) == 8 and len(_study_date_str) == 8:
+        try:
+            from datetime import datetime as _dt
+            _bd = _dt.strptime(_birth_date_str, "%Y%m%d")
+            _sd = _dt.strptime(_study_date_str, "%Y%m%d")
+            _delta_days = (_sd - _bd).days
+            _total_months = int(_delta_days / 30.4375)
+            _age_y = _total_months // 12
+            _age_m = _total_months % 12
+            if _age_m > 0:
+                patient_age = f"{_age_y}Y{_age_m}M"  # e.g. "10Y11M"
+            else:
+                patient_age = f"{_age_y:03d}Y"        # e.g. "011Y"
+        except ValueError:
+            pass
+    # Fallback to PatientAge tag only if dates unavailable
     if not patient_age:
-        birth_date_str = dicom_meta.get("PatientBirthDate") or ""
-        study_date_str = study_date or ""
-        if len(birth_date_str) == 8 and len(study_date_str) >= 8:
-            try:
-                from datetime import datetime as _dt
-                bd = _dt.strptime(birth_date_str, "%Y%m%d")
-                sd = _dt.strptime(study_date_str[:8], "%Y%m%d")
-                age_years = (sd - bd).days // 365
-                patient_age = f"{age_years:03d}Y"
-            except ValueError:
-                pass
+        patient_age = dicom_meta.get("PatientAge") or None
 
     ai_resultados: dict[str, Any] = {
         "scope": "estudio",
@@ -1388,6 +1427,15 @@ async def generar_informe(
         # Assemble prompt from template
         _custom_sys = None
         _custom_prompt = None
+
+        # ── Enrich ai_resultados with routing metadata for ClinicalAuditEngine ──
+        # resolve_body_part() uses exam_region and template_id as the primary
+        # resolution layers (before DICOM keyword fallback).
+        ai_resultados["template_id"] = _template_id
+        if classification and classification.region:
+            ai_resultados["exam_region"] = classification.region.value
+        # ─────────────────────────────────────────────────────────────────────
+
         try:
             _custom_sys, _custom_prompt = assemble_prompt(_template_id, _template_context)
             logger.info("[T4.2] Template assembled: %s", _template_id)
@@ -1425,6 +1473,13 @@ async def generar_informe(
             _custom_sys = None
             _custom_prompt = None
 
+        # ── FIX-2: Inject additional DICOM metadata block ─────────────────────────
+        # Runs AFTER assemble_prompt and BEFORE inject_clinical_note, so that
+        # the clinical note always appears closest to the prompt body.
+        if _custom_prompt is not None:
+            _dicom_ctx_for_metadata = extract_patient_context(_first_tags)
+            _custom_prompt = inject_additional_metadata(_custom_prompt, _dicom_ctx_for_metadata)
+
         # ── v1.1: Inject clinical note into prompt (T-08) ─────────────────────────
         # If pipeline v1.1 and a sanitized nota_clinica exists, inject it now.
         # If no note (or v1 path), the prompt is unchanged (Scenario 9).
@@ -1441,7 +1496,7 @@ async def generar_informe(
         _proyecciones_txt = _template_context.get("projections_text", "estándar")
         _informe_es_fallback = False  # type annotation removed — nonlocal can't have annotated assignment
         if _use_v11 and _pipeline_ctx is not None:
-            _pipeline_ctx.start_phase("generation", model=settings.GEMINI_MODEL)
+            _pipeline_ctx.start_phase("generation", model=settings.GEMINI_PRO_MODEL)
         try:
             informe_texto, _informe_es_fallback = await generar_informe_llm(
                 ai_resultados=ai_resultados,
@@ -1748,7 +1803,7 @@ async def generar_informe(
             ai_hallazgos=study_findings,
             ai_todas_patologias=todas_patologias_resumen,
             informe_generado=informe_texto,
-            modelo_llm=settings.GEMINI_MODEL,
+            modelo_llm=settings.GEMINI_PRO_MODEL,
             usuario_id=current_user.user_id,
             usuario_email=current_user.email,
             cobro_estado=cobro_info["estado"],
@@ -1787,7 +1842,7 @@ async def generar_informe(
         "estudio_url": f"/estudio/{informe_short_id}",
         "informe_texto": informe_texto,
         "ai_resultados": ai_resultados,
-        "modelo_llm": settings.GEMINI_MODEL,
+        "modelo_llm": settings.GEMINI_PRO_MODEL,
         "creditos_restantes": cobro_info["creditos_restantes"],
         "cobro_info": {
             "estado": cobro_info["estado"],

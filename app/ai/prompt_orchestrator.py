@@ -192,6 +192,7 @@ class ExamRegion(str, Enum):
     BRAIN = "brain"
     ABDOMEN = "abdomen"
     PELVIS = "pelvis"
+    HAND = "hand"
     GENERIC = "generic"
 
 
@@ -241,6 +242,21 @@ class PatientContext(BaseModel):
     study_description: str = ""
     view_position: str = ""
     requested_procedure: str = ""
+    # ── Enrichment fields (FIX-2: DICOM metadata enrichment) ─────────────────
+    patient_weight: str = ""        # PatientWeight (kg) — relevant for pediatric dosing
+    patient_size: str = ""          # PatientSize (height in meters) — body habitus
+    institution_name: str = ""      # InstitutionName — correlates with equipment quality
+    referring_physician: str = ""   # ReferringPhysicianName — clinical context
+    patient_birth_date: str = ""    # PatientBirthDate — enables age cross-validation
+    number_of_frames: str = ""      # NumberOfFrames — multi-frame studies
+    image_laterality: str = ""      # ImageLaterality — L/R/B — critical for MSK
+    patient_orientation: str = ""   # PatientOrientation — patient positioning
+    protocol_name: str = ""         # ProtocolName — acquisition protocol
+    acquisition_device: str = ""    # ManufacturerModelName — equipment model
+    kvp: str = ""                   # KVP — tube voltage
+    exposure: str = ""              # Exposure — radiation dose (mAs)
+    slice_thickness: str = ""       # SliceThickness — for CT studies
+    contrast_agent: str = ""        # ContrastBolusAgent — was contrast used?
 
 
 class PromptTemplate(BaseModel):
@@ -323,6 +339,61 @@ BODY_PART_ALIASES: dict[str, str] = {
     "PELVIS": "pelvis",
     "HIP": "pelvis",
     "CADERA": "pelvis",
+    # Hand / bone age
+    "HAND": "hand",
+    "MANO": "hand",
+    "HANDRIGHT": "hand",
+    "HANDLEFT": "hand",
+    "MANODERECHA": "hand",
+    "MANOIZQUIERDA": "hand",
+    # ── Anatomía chilena (v14 — gaps MSK) ────────────────────────────────────
+    # TOBILLO, CODO, PIE: mapean a ExamRegion existentes en _TEMPLATE_MAP
+    # para activar msk_xray template → BodyPart.SKELETAL → AuditMode.DESCRIPTIVE.
+    # No se crea ExamRegion.ANKLE/ELBOW/FOOT para evitar explosión del enum —
+    # el audit engine trata cualquier hueso largo como SKELETAL, lo que es correcto.
+    "TOBILLO": "knee",          # tobillo → msk_xray (extremidad inferior distal)
+    "ANKLE": "knee",
+    "ANKLERIGHT": "knee",
+    "ANKLELEFT": "knee",
+    "TOBILLODERECHO": "knee",
+    "TOBILLOIZQUIERDO": "knee",
+    "CODO": "shoulder",         # codo → msk_xray (extremidad superior)
+    "ELBOW": "shoulder",
+    "ELBOWRIGHT": "shoulder",
+    "ELBOWLEFT": "shoulder",
+    "CODODERECHO": "shoulder",
+    "CODOIZQUIERDO": "shoulder",
+    "PIE": "knee",              # pie → msk_xray (extremidad inferior distal)
+    "FOOT": "knee",
+    "FOOTRIGHT": "knee",
+    "FOOTLEFT": "knee",
+    "PIEDERECHO": "knee",
+    "PIEIZQUIERDO": "knee",
+    "FEMUR": "knee",            # fémur → msk_xray
+    "FÉMUR": "knee",
+    "TIBIA": "knee",
+    "PERONE": "knee",
+    "PERONÉ": "knee",
+    "HUMERO": "shoulder",       # húmero → msk_xray
+    "HÚMERO": "shoulder",
+    "RADIO": "wrist",           # radio/cúbito → wrist template (extremidad distal)
+    "CUBITO": "wrist",
+    "CÚBITO": "wrist",
+    "CRAVICULA": "shoulder",    # clavícula → shoulder template
+    "CLAVÍCULA": "shoulder",
+    "CLAVICULA": "shoulder",
+    "ESCÁPULA": "shoulder",
+    "ESCAPULA": "shoulder",
+    "SCAPULA": "shoulder",
+    "ROTULA": "knee",           # rótula → knee template
+    "RÓTULA": "knee",
+    "PATELLA": "knee",
+    "CALCANEO": "knee",         # calcáneo → extremidad inferior distal
+    "CALCÁNEO": "knee",
+    "CALCANEUS": "knee",
+    "ASTRAGALO": "knee",        # astrágalo → extremidad inferior distal
+    "ASTRÁGALO": "knee",
+    "TALUS": "knee",
 }
 
 # ============================================================
@@ -425,6 +496,22 @@ def normalize_metadata(ctx: PatientContext) -> dict[str, Any]:
     }
 
 
+# ── DICOM tag null-like sanitization (local copy) ─────────────────────────────
+# Cannot import from dicom_service (circular dependency).
+# Duplicates the frozenset + function from dicom_service.clean_dicom_tag.
+_NULL_LIKE = frozenset({"null", "none", "unknown", "undefined", ""})
+
+
+def _clean_tag(value: Any) -> str | None:
+    """Return *None* when a DICOM tag value is semantically empty."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s.lower() in _NULL_LIKE:
+        return None
+    return s
+
+
 def extract_patient_context(instance_data: dict[str, Any]) -> PatientContext:
     """
     Map raw DICOM metadata dict to a PatientContext model.
@@ -449,14 +536,47 @@ def extract_patient_context(instance_data: dict[str, Any]) -> PatientContext:
         'DX'
     """
     return PatientContext(
-        age=instance_data.get("PatientAge") or "",
-        sex=instance_data.get("PatientSex") or "No especificado",
-        modality_raw=instance_data.get("Modality") or "",
-        body_part_examined=instance_data.get("BodyPartExamined") or "",
-        series_description=instance_data.get("SeriesDescription") or "",
-        study_description=instance_data.get("StudyDescription") or "",
-        view_position=instance_data.get("ViewPosition") or "",
-        requested_procedure=instance_data.get("RequestedProcedureDescription") or "",
+        age=_clean_tag(instance_data.get("PatientAge")) or "",
+        sex=_clean_tag(instance_data.get("PatientSex")) or "No especificado",
+        modality_raw=_clean_tag(instance_data.get("Modality")) or "",
+        body_part_examined=_clean_tag(instance_data.get("BodyPartExamined")) or "",
+        series_description=_clean_tag(instance_data.get("SeriesDescription")) or "",
+        study_description=_clean_tag(instance_data.get("StudyDescription")) or "",
+        view_position=_clean_tag(instance_data.get("ViewPosition")) or "",
+        requested_procedure=_clean_tag(instance_data.get("RequestedProcedureDescription")) or "",
+        # ── FIX-2: Enrichment fields ──────────────────────────────────────────
+        patient_weight=sanitize_dicom_text(
+            _clean_tag(instance_data.get("PatientWeight")) or ""
+        ),
+        patient_size=sanitize_dicom_text(
+            _clean_tag(instance_data.get("PatientSize")) or ""
+        ),
+        institution_name=sanitize_dicom_text(
+            _clean_tag(instance_data.get("InstitutionName")) or ""
+        ),
+        referring_physician=sanitize_dicom_text(
+            _clean_tag(instance_data.get("ReferringPhysicianName")) or ""
+        ),
+        patient_birth_date=_clean_tag(instance_data.get("PatientBirthDate")) or "",
+        number_of_frames=_clean_tag(instance_data.get("NumberOfFrames")) or "",
+        image_laterality=sanitize_dicom_text(
+            _clean_tag(instance_data.get("ImageLaterality")) or ""
+        ),
+        patient_orientation=sanitize_dicom_text(
+            _clean_tag(instance_data.get("PatientOrientation")) or ""
+        ),
+        protocol_name=sanitize_dicom_text(
+            _clean_tag(instance_data.get("ProtocolName")) or ""
+        ),
+        acquisition_device=sanitize_dicom_text(
+            _clean_tag(instance_data.get("ManufacturerModelName")) or ""
+        ),
+        kvp=_clean_tag(instance_data.get("KVP")) or "",
+        exposure=_clean_tag(instance_data.get("Exposure")) or "",
+        slice_thickness=_clean_tag(instance_data.get("SliceThickness")) or "",
+        contrast_agent=sanitize_dicom_text(
+            _clean_tag(instance_data.get("ContrastBolusAgent")) or ""
+        ),
     )
 
 
@@ -517,6 +637,10 @@ _TEMPLATE_MAP: dict[tuple[str, "ExamModality"], tuple["ExamRegion", str]] = {
     ("cervical_spine", ExamModality.XRAY): (ExamRegion.CERVICAL_SPINE, "msk_xray"),
     ("brain",          ExamModality.CT):   (ExamRegion.BRAIN,          "brain_ct"),
     ("brain",          ExamModality.MRI):  (ExamRegion.BRAIN,          "brain_ct"),
+    # FIX 4: Pelvis/Hip X-Ray — dedicated template (replaces generic_fallback)
+    ("pelvis",         ExamModality.XRAY): (ExamRegion.PELVIS,         "pelvis_hip_xray"),
+    # FIX 5: Hand X-Ray — bone age / general hand template
+    ("hand",           ExamModality.XRAY): (ExamRegion.HAND,           "bone_age_xray"),
 }
 
 # ── Keyword → region mapping (module-level constant — Fix C-01) ───────────────
@@ -528,6 +652,19 @@ _KEYWORD_REGION: list[tuple[frozenset[str], str, "ExamRegion"]] = [
     (frozenset({"COLUMNA", "LUMBAR", "SPINE", "LSPINE"}),            "lumbar_spine_xray", ExamRegion.LUMBAR_SPINE),
     (frozenset({"CSPINE", "CERVICAL"}),                               "msk_xray",          ExamRegion.CERVICAL_SPINE),
     (frozenset({"CRANEO", "CRÁNEO", "CEREBRO", "BRAIN", "HEAD"}),   "brain_ct",          ExamRegion.BRAIN),
+    # FIX 4: Pelvis/Hip keywords
+    (frozenset({"PELVIS", "CADERA", "HIP"}),                         "pelvis_hip_xray",   ExamRegion.PELVIS),
+    # FIX 5: Hand / bone age keywords
+    (frozenset({"MANO", "HAND", "EDAD OSEA", "BONE AGE", "MADURACION", "ESQUELETICA"}),
+                                                                      "bone_age_xray",     ExamRegion.HAND),
+    # v14: Anatomía chilena MSK — extremidades sin alias previo en Rule 1
+    (frozenset({"TOBILLO", "ANKLE", "PIE", "FOOT", "CALCANEO", "CALCÁNEO",
+                "ASTRAGALO", "ASTRÁGALO", "TALUS", "PERONE", "PERONÉ", "TIBIA"}),
+                                                                      "msk_xray",          ExamRegion.KNEE),
+    (frozenset({"CODO", "ELBOW", "HUMERO", "HÚMERO", "RADIO", "CUBITO", "CÚBITO",
+                "CLAVICULA", "CLAVÍCULA", "ESCAPULA", "ESCÁPULA", "SCAPULA"}),
+                                                                      "msk_xray",          ExamRegion.SHOULDER),
+    (frozenset({"ROTULA", "RÓTULA", "PATELLA", "FEMUR", "FÉMUR"}),  "msk_xray",          ExamRegion.KNEE),
 ]
 
 
@@ -1051,3 +1188,386 @@ def inject_clinical_note(prompt: str, nota_clinica: str | None) -> str:
     if len(lines) == 2:
         return lines[0] + "\n" + nota_block + "\n" + lines[1]
     return nota_block + "\n" + prompt
+
+
+# ============================================================
+# FIX-2: Additional DICOM Metadata Injection
+# ============================================================
+
+
+def inject_additional_metadata(prompt: str, ctx: "PatientContext") -> str:
+    """Inject additional DICOM metadata block after the safety preamble.
+
+    Inserts a concise metadata block with enrichment fields from the
+    PatientContext that were not part of the original template placeholders.
+    This ensures Gemini receives the maximum clinical context without
+    requiring changes to existing YAML templates.
+
+    The block is inserted AFTER the first line of the prompt (safety preamble)
+    and BEFORE the clinical note injection (which runs after this function).
+
+    Args:
+        prompt: Pre-assembled prompt string (already safety-preamble-prefixed).
+        ctx: PatientContext with all enrichment fields populated.
+
+    Returns:
+        Modified prompt string with the metadata block inserted.
+        If no enrichment data is available, returns the prompt unchanged.
+    """
+    metadata_lines: list[str] = []
+
+    if ctx.patient_weight:
+        metadata_lines.append(f"Peso: {ctx.patient_weight} kg")
+    if ctx.patient_size:
+        metadata_lines.append(f"Talla: {ctx.patient_size} m")
+    if ctx.institution_name:
+        metadata_lines.append(f"Institución: {ctx.institution_name}")
+    if ctx.image_laterality:
+        metadata_lines.append(f"Lateralidad: {ctx.image_laterality}")
+    if ctx.protocol_name:
+        metadata_lines.append(f"Protocolo: {ctx.protocol_name}")
+    if ctx.acquisition_device:
+        metadata_lines.append(f"Equipo: {ctx.acquisition_device}")
+    if ctx.kvp:
+        metadata_lines.append(f"kVp: {ctx.kvp}")
+    if ctx.exposure:
+        metadata_lines.append(f"Exposición: {ctx.exposure} mAs")
+    if ctx.contrast_agent:
+        metadata_lines.append(f"Agente de contraste: {ctx.contrast_agent}")
+    if ctx.slice_thickness:
+        metadata_lines.append(f"Grosor de corte: {ctx.slice_thickness} mm")
+    if ctx.number_of_frames:
+        metadata_lines.append(f"Número de frames: {ctx.number_of_frames}")
+    if ctx.patient_orientation:
+        metadata_lines.append(f"Orientación del paciente: {ctx.patient_orientation}")
+
+    if not metadata_lines:
+        return prompt
+
+    metadata_block = (
+        "\n── METADATA DICOM ADICIONAL ─────────────────────────────────────\n"
+        + "\n".join(metadata_lines)
+        + "\n────────────────────────────────────────────────────────────────\n"
+    )
+
+    lines = prompt.split("\n", 1)
+    if len(lines) == 2:
+        return lines[0] + "\n" + metadata_block + lines[1]
+    return metadata_block + "\n" + prompt
+
+
+# ============================================================
+# FIX-3: Age Sanity Validation
+# ============================================================
+
+
+def validate_patient_age(ctx: "PatientContext") -> tuple[str, list[str]]:
+    """Validate patient age against clinical plausibility.
+
+    Performs three sanity checks:
+      1. Neonates (< ~36 days) flagged for adult/MSK studies.
+      2. Age > 120 years is physiologically impossible.
+      3. Cross-validation against PatientBirthDate when available.
+
+    If a discrepancy is found, the function prefers the calculated age from
+    PatientBirthDate (when plausible) over the PatientAge tag value, so that
+    a data-entry error (e.g. operator typed "1D" instead of the actual age)
+    does not propagate to the report.
+
+    Args:
+        ctx: PatientContext with age and optional patient_birth_date fields.
+
+    Returns:
+        (validated_age, warnings) — validated_age may be empty if the age is
+        clearly wrong; warnings contains human-readable quality flag strings.
+        Never raises.
+    """
+    warnings: list[str] = []
+    age_str = (ctx.age or "").strip().upper()
+
+    if not age_str:
+        return "", []
+
+    # ── Parse age value to years ──────────────────────────────────────────────
+    age_years: float | None = None
+    try:
+        # Compound format e.g. "10Y11M" (years + months) — must check before plain "Y"
+        _compound = re.match(r"^(\d+)Y(\d+)M$", age_str)
+        if _compound:
+            age_years = float(_compound.group(1)) + float(_compound.group(2)) / 12.0
+        elif age_str.endswith("Y"):
+            age_years = float(age_str[:-1])
+        elif age_str.endswith("M"):
+            age_years = float(age_str[:-1]) / 12.0
+        elif age_str.endswith("D"):
+            age_years = float(age_str[:-1]) / 365.25
+        elif age_str.endswith("W"):
+            age_years = float(age_str[:-1]) / 52.18
+    except (ValueError, TypeError):
+        pass  # Non-standard format — pass through unchanged
+
+    if age_years is None:
+        return age_str, []  # Can't parse → pass through, don't block
+
+    # ── Rule 1: Neonate + adult/MSK study is implausible ─────────────────────
+    body_part = (ctx.body_part_examined or "").upper()
+    study_combined = (
+        (ctx.study_description or "") + " " + (ctx.requested_procedure or "")
+    ).upper()
+    adult_studies = {
+        "LUMBAR", "PELVIS", "CADERA", "HIP", "RODILLA", "KNEE",
+        "HOMBRO", "SHOULDER", "COLUMNA", "SPINE", "WRIST", "MUÑECA",
+        "MUNECA", "TORAX", "TÓRAX", "CHEST",
+        # v14: nuevas regiones MSK
+        "TOBILLO", "ANKLE", "CODO", "ELBOW", "PIE", "FOOT",
+        "FEMUR", "FÉMUR", "TIBIA", "HUMERO", "HÚMERO",
+    }
+    if age_years < 0.1 and any(
+        kw in body_part or kw in study_combined for kw in adult_studies
+    ):
+        warnings.append(
+            f"⚠ Edad DICOM '{age_str}' incompatible con estudio de "
+            f"'{ctx.body_part_examined or 'desconocido'}'. Posible error de carga."
+        )
+        logger.warning(
+            "[AGE-VALIDATION] Implausible neonate age '%s' for study '%s' — clearing age field",
+            age_str,
+            ctx.body_part_examined or ctx.study_description,
+        )
+        return "", warnings  # Better no age than a wrong age
+
+    # ── Rule 2: Age > 120 years is impossible ────────────────────────────────
+    if age_years > 120:
+        warnings.append(
+            f"⚠ Edad DICOM '{age_str}' supera 120 años. Posible error de carga."
+        )
+        logger.warning(
+            "[AGE-VALIDATION] Impossible age '%s' (%.1f years) — clearing age field",
+            age_str,
+            age_years,
+        )
+        return "", warnings
+
+    # ── Rule 3: Cross-validate with PatientBirthDate ──────────────────────────
+    if ctx.patient_birth_date:
+        try:
+            from datetime import date, datetime
+
+            bd = ctx.patient_birth_date.strip()
+            if len(bd) == 8:  # YYYYMMDD format
+                birth = datetime.strptime(bd, "%Y%m%d").date()
+                today = date.today()
+                calculated_years = (today - birth).days / 365.25
+
+                if abs(calculated_years - age_years) > 1:
+                    warnings.append(
+                        f"⚠ Discrepancia entre PatientAge ('{age_str}' = {age_years:.1f}a) "
+                        f"y PatientBirthDate ('{bd}' = {calculated_years:.1f}a). "
+                        "Datos DICOM posiblemente incorrectos."
+                    )
+                    logger.warning(
+                        "[AGE-VALIDATION] Age mismatch: PatientAge='%s' (%.1fa) vs "
+                        "PatientBirthDate='%s' (%.1fa) — using birth-date-derived age",
+                        age_str,
+                        age_years,
+                        bd,
+                        calculated_years,
+                    )
+                    # Use calculated age when birth date is plausible
+                    if 0.1 < calculated_years < 120:
+                        return f"{int(calculated_years)}Y", warnings
+                    return "", warnings
+        except Exception:
+            pass  # Can't parse birth date — skip cross-validation, never crash
+
+    return age_str, warnings
+
+
+# ============================================================
+# DemographicSanitizer (v15) — Anomalous DICOM Age Resolution
+# ============================================================
+#
+# Builds on validate_patient_age() to produce a clinical context hint
+# when the DICOM age tag is anomalous (neonate for adult study, > 120y, etc).
+#
+# Problem solved (Caso GODOY):
+#   PatientAge = "001D" for a 41-year-old adult with lumbar spine X-ray.
+#   validate_patient_age() correctly returns "" (no age better than wrong age).
+#   BUT llm_service then receives age="" → no age block → model defaults to
+#   describing "cartílagos abiertos" and "densidad ósea pediátrica".
+#
+# Solution:
+#   sanitize_demographic_context() returns:
+#     (sanitized_age, age_hint, warnings)
+#   where age_hint is injected into the prompt when sanitized_age is empty due
+#   to an anomalous DICOM value, forcing adult descriptive context.
+#
+# The hint is anatomically grounded: if the VALIDATED prompt already contains
+# adult radiological findings (osteofitos, esclerosis, etc.), the caller can
+# pass them back to reinforce the hint. In practice, the hint is set at the
+# point of AGE VALIDATION (before generation), not post-hoc, so it uses the
+# raw DICOM study type as the signal (adult study → assume adult patient).
+
+# Findings that indicate skeletal maturity (adult patient) — used for biologic
+# plausibility check when PatientAge tag is anomalous.
+_ADULT_SKELETAL_MARKERS: frozenset[str] = frozenset({
+    "osteofito", "osteofitos", "esclerosis subcondral", "degenerativo",
+    "espondilosis", "espondiloartrosis", "artrosis", "pinzamiento",
+    "ateromatosis", "calcificación", "calcificacion", "entesopatía", "entesopatia",
+    "rodetes osteofiticos", "rodetes osteofíticos", "discopatia", "discopatía",
+})
+
+
+class DemographicSanitizeResult:
+    """Result of sanitize_demographic_context().
+
+    Attributes:
+        age: Sanitized age string (may be empty if anomalous and unrecoverable).
+        age_hint: Prose hint to inject into the prompt when ``age`` is empty
+            due to an anomalous DICOM value. Empty string when ``age`` is valid.
+        was_anomalous: True when the original DICOM age tag was rejected.
+        warnings: Human-readable quality flag strings from validate_patient_age().
+    """
+
+    __slots__ = ("age", "age_hint", "was_anomalous", "warnings")
+
+    def __init__(
+        self,
+        age: str,
+        age_hint: str,
+        was_anomalous: bool,
+        warnings: list[str],
+    ) -> None:
+        self.age = age
+        self.age_hint = age_hint
+        self.was_anomalous = was_anomalous
+        self.warnings = warnings
+
+
+def sanitize_demographic_context(
+    ctx: "PatientContext",
+    report_text: str = "",
+) -> DemographicSanitizeResult:
+    """Sanitize patient age and produce a descriptive context hint.
+
+    This is the public DemographicSanitizer API for v15.  It wraps
+    validate_patient_age() and, when the age tag is anomalous, synthesises
+    an ``age_hint`` string that the prompt builder injects to force adult
+    descriptive context — preventing the model from using pediátric language
+    for an adult patient just because the DICOM tag says "1D".
+
+    The hint is grounded on two signals (in priority order):
+      1. Study type: if the study region is in adult_studies, assume adult.
+      2. Report text: if a draft report already mentions adult skeletal
+         markers (osteofitos, esclerosis, etc.), reinforce with "adult" hint.
+
+    Caller contract:
+      - If result.was_anomalous is True AND result.age is empty:
+          Inject result.age_hint into the prompt (after TECNICA section).
+          Log result.warnings as [AGE-SANITIZER] entries.
+      - If result.was_anomalous is False:
+          Use result.age normally (it may be the corrected birth-date age).
+
+    Args:
+        ctx: PatientContext with age and study metadata.
+        report_text: Optional draft report text for bio-marker scan.
+            Pass "" when calling before generation (typical case).
+
+    Returns:
+        DemographicSanitizeResult with age, age_hint, was_anomalous, warnings.
+    """
+    original_age = (ctx.age or "").strip().upper()
+    validated_age, warnings = validate_patient_age(ctx)
+
+    # No anomaly — pass through
+    if validated_age == original_age and original_age:
+        return DemographicSanitizeResult(
+            age=validated_age,
+            age_hint="",
+            was_anomalous=False,
+            warnings=warnings,
+        )
+
+    # Detect whether the original value was actually anomalous (vs. corrected)
+    was_anomalous = bool(warnings)
+
+    if not was_anomalous:
+        # validate_patient_age corrected via PatientBirthDate — use corrected age
+        return DemographicSanitizeResult(
+            age=validated_age,
+            age_hint="",
+            was_anomalous=False,
+            warnings=warnings,
+        )
+
+    # ── Anomalous age: build context hint ─────────────────────────────────────
+    # Signal 1: adult study type
+    body_part = (ctx.body_part_examined or "").upper()
+    study_combined = (
+        (ctx.study_description or "") + " " + (ctx.requested_procedure or "")
+    ).upper()
+    _adult_kws = {
+        "LUMBAR", "PELVIS", "CADERA", "HIP", "RODILLA", "KNEE",
+        "HOMBRO", "SHOULDER", "COLUMNA", "SPINE", "WRIST", "MUÑECA",
+        "MUNECA", "TORAX", "TÓRAX", "CHEST",
+        "TOBILLO", "ANKLE", "CODO", "ELBOW", "PIE", "FOOT",
+        "FEMUR", "FÉMUR", "TIBIA", "HUMERO", "HÚMERO",
+    }
+    is_adult_study = any(kw in body_part or kw in study_combined for kw in _adult_kws)
+
+    # Signal 2: adult skeletal markers in draft report
+    report_lower = report_text.lower()
+    has_adult_markers = any(marker in report_lower for marker in _ADULT_SKELETAL_MARKERS)
+
+    if is_adult_study or has_adult_markers:
+        # Compose a concrete, radiologically-grounded hint
+        _region_label = ctx.body_part_examined or ctx.study_description or "región evaluada"
+        if has_adult_markers:
+            _bio_context = (
+                "El análisis morfológico de las imágenes revela hallazgos consistentes "
+                "con maduración esquelética completa (osteofitos, esclerosis, cambios "
+                "degenerativos). "
+            )
+        else:
+            _bio_context = ""
+
+        age_hint = (
+            "\n"
+            "⚠ NOTA DE SANITIZACIÓN DEMOGRÁFICA (v15): El tag PatientAge del DICOM "
+            f"'{original_age}' fue detectado como anómalo e incompatible con el tipo de "
+            f"estudio ('{_region_label}'). Ha sido descartado automáticamente.\n"
+            f"{_bio_context}"
+            "INSTRUCCIÓN: Describí los hallazgos como corresponde a un PACIENTE ADULTO. "
+            "NO uses lenguaje pediátrico (cartílagos de crecimiento abiertos, núcleos de "
+            "osificación inmaduros, densidad ósea pediátrica). "
+            "Usá terminología de adulto: trama trabecular, márgenes articulares, "
+            "espacios discales, procesos degenerativos si corresponde.\n"
+        )
+
+        logger.warning(
+            "[DEMOGRAPHIC-SANITIZER] Age '%s' rejected for '%s' study — "
+            "adult context hint injected. bio_markers=%s",
+            original_age,
+            _region_label,
+            has_adult_markers,
+        )
+    else:
+        # No enough signal to determine adult vs pediatric — use generic hint
+        age_hint = (
+            "\n"
+            "⚠ NOTA DE SANITIZACIÓN DEMOGRÁFICA (v15): El tag PatientAge del DICOM "
+            f"'{original_age}' fue detectado como anómalo y descartado. "
+            "Describí los hallazgos según la anatomía observada, sin asumir un rango "
+            "etario específico.\n"
+        )
+        logger.warning(
+            "[DEMOGRAPHIC-SANITIZER] Age '%s' rejected, study type unclear — generic hint.",
+            original_age,
+        )
+
+    return DemographicSanitizeResult(
+        age="",
+        age_hint=age_hint,
+        was_anomalous=True,
+        warnings=warnings,
+    )
