@@ -971,6 +971,12 @@ async def _build_template_context(
             "ml_findings": _hallazgos_confirmados_r,
             "projections_text": proyecciones_txt,
             "supplementary_findings_block": "",
+            "clinical_indication": sanitize_dicom_text(
+                (pipeline_ctx.nota_clinica if pipeline_ctx else None)
+                or first_tags.get("StudyDescription")
+                or first_tags.get("RequestedProcedureDescription")
+                or "No proporcionada"
+            ),
         }
     elif _is_brain_ct:
         _contrast_raw = (
