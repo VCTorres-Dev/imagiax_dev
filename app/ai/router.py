@@ -183,6 +183,11 @@ class GenerarInformeRequest(BaseModel):
     nota_clinica: str | None = Field(default=None, max_length=500)
     solicitar_auditoria: bool = Field(default=False)
     version_pipeline: str | None = Field(default=None, max_length=10)
+    # ── v15.1: benchmark / testing flag ──────────────────────────────────────
+    # When True, skips the deduplication check and forces a full re-run of the
+    # pipeline even if a report already exists for this study.
+    # Intended for benchmarking and regression testing only — not for production use.
+    force_regenerate: bool = Field(default=False)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1150,7 +1155,9 @@ async def generar_informe(
     _use_v11 = _effective_version == "1.1"
 
     # ── Step 0: Deduplication ────────────────────────────────────────────────
-    existing = await _check_dedup(pool, current_user.user_id, body.study_instance_uid, pipeline_version=_effective_version)
+    existing = None if body.force_regenerate else await _check_dedup(
+        pool, current_user.user_id, body.study_instance_uid, pipeline_version=_effective_version
+    )
     if existing:
         logger.info(
             "Duplicate report found for study %s (ID: %s). Returning existing.",

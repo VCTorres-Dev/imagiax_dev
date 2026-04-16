@@ -72,6 +72,24 @@ _BOOSTER_ELIGIBLE_REGIONS: frozenset[BodyPart] = frozenset({
     BodyPart.PELVIS,
 })
 
+# ── Hard blacklist — Booster NEVER activates for these regions ─────────────────
+# Reason: tórax/chest carries high risk of false positives (pneumonia, nodules).
+# The ClinicalAuditEngine already handles chest findings. The Booster adds no
+# value here and its activation was confirmed empirically as a safety regression
+# (AGUILERA benchmark, 2026-04-16).
+_BOOSTER_BLACKLIST_REGIONS: frozenset[BodyPart] = frozenset({
+    BodyPart.CHEST,
+})
+
+# Template IDs that should also hard-block the Booster regardless of BodyPart.
+# Add more prefixes here as new templates are introduced.
+_BOOSTER_BLACKLIST_TEMPLATE_PREFIXES: tuple[str, ...] = (
+    "chest_xray",
+    "thorax",
+    "torax",
+    "chest",
+)
+
 # ── Gemini model for Booster phases (Flash — fast, cheap, sufficient) ─────────
 _BOOSTER_MODEL = "gemini-2.0-flash"
 
@@ -145,10 +163,13 @@ INSTRUCCIÓN DE ZOOM COGNITIVO — FASE 2 ATTENTION BOOSTER
 ══════════════════════════════════════════════════════════════
 
 Realizá un zoom cognitivo focalizado en las interfases articulares y entesis.
-Estadísticamente, buscamos evidencia de cambios degenerativos incipientes.
+Buscá evidencia de cambios óseos: esclerosis subcondral, osteofitos incipientes,
+irregularidades corticales sutiles, o pinzamiento articular que el borrador NO reportó.
 
-Pregunta específica: ¿Existen señales de esclerosis subcondral, osteofitos incipientes,
-irregularidades corticales sutiles, o pinzamiento articular que el borrador NO reportó?
+RESTRICCIÓN CRÍTICA DE FOCO (obligatoria — no negociable):
+Si el área evaluada es parénquima pulmonar o silueta cardíaca, NO emitas hallazgos
+adicionales sobre esas estructuras. Limitá tu atención exclusivamente a estructuras
+esqueléticas y tejidos blandos periféricos.
 
 ANCLA DE NEGACIÓN (obligatoria):
 Si la cortical ósea es lisa y continua, y el espacio articular es simétrico y conservado,
@@ -156,14 +177,15 @@ ratificá la normalidad del informe previo respondiendo exactamente: SIN_HALLAZG
 No inventés patología. La ausencia de hallazgos es un resultado clínicamente válido.
 
 REGLAS ESTRICTAS:
-1. Solo reportá hallazgos NUEVOS — no repetir lo que ya está en el borrador.
-2. Si no hay nada nuevo, respondé exactamente: SIN_HALLAZGOS_NUEVOS
-3. Para cada hallazgo nuevo, indicá:
+1. Solo reportá hallazgos NUEVOS en estructuras óseas o tejidos blandos periféricos.
+2. NO reportés hallazgos sobre pulmones, pleura, corazón ni mediastino.
+3. Si no hay nada nuevo en estructuras óseas, respondé exactamente: SIN_HALLAZGOS_NUEVOS
+4. Para cada hallazgo nuevo, indicá:
    - LOCALIZACIÓN: (ej. "interfaz articular L4-L5", "polo superior acetabular derecho")
    - DESCRIPCIÓN: (qué ves morfológicamente)
    - CONFIANZA: alta / media / baja
-4. Usá lenguaje morfológico objetivo, no diagnóstico definitivo.
-5. Máximo 3 hallazgos nuevos para evitar sobre-diagnóstico.
+5. Usá lenguaje morfológico objetivo, no diagnóstico definitivo.
+6. Máximo 3 hallazgos nuevos para evitar sobre-diagnóstico.
 
 Formato de respuesta (si hay hallazgos nuevos):
 HALLAZGO_1:
@@ -227,11 +249,33 @@ class AttentionBooster:
     The final report is the draft + confirmed new findings in hedging language.
     """
 
-    def should_activate(self, body_part: BodyPart) -> bool:
+    def should_activate(self, body_part: BodyPart, template_id: str = "") -> bool:
         """Return True only for MSK and Pelvis regions.
 
-        CHEST is explicitly excluded — risk of false positives outweighs benefit.
+        Hard blacklist (evaluated first, overrides everything):
+        - BodyPart.CHEST / THORAX → always False.
+        - template_id starting with chest_xray, thorax, torax, chest → always False.
+
+        This dual check exists because BodyPart is inferred from DICOM metadata and
+        can be missing or incorrect; template_id is assigned by the application and
+        is more reliable.  Both gates must pass.
         """
+        # ── Gate 1: template_id blacklist (most reliable signal) ──────────────
+        tid_lower = (template_id or "").lower().strip()
+        if tid_lower and any(tid_lower.startswith(p) for p in _BOOSTER_BLACKLIST_TEMPLATE_PREFIXES):
+            logger.debug(
+                "[BOOSTER] Blocked by template_id blacklist: template_id=%r", template_id
+            )
+            return False
+
+        # ── Gate 2: BodyPart hard blacklist ────────────────────────────────────
+        if body_part in _BOOSTER_BLACKLIST_REGIONS:
+            logger.debug(
+                "[BOOSTER] Blocked by BodyPart blacklist: body_part=%s", body_part.value
+            )
+            return False
+
+        # ── Gate 3: Eligible whitelist ─────────────────────────────────────────
         return body_part in _BOOSTER_ELIGIBLE_REGIONS
 
     async def _phase2_boost(

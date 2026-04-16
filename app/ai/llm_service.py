@@ -587,7 +587,7 @@ REGLAS:
                 custom_system_instruction=custom_system_instruction,
                 modalidad=modalidad,
             )
-            if _attention_booster.should_activate(_body_part):
+            if _attention_booster.should_activate(_body_part, template_id=ai_resultados.get("template_id", "")):
                 try:
                     report_text, _was_boosted = await _attention_booster.run(
                         draft_report=report_text,
