@@ -1,0 +1,48 @@
+﻿{
+    "generated_at":  "2026-04-25T03:21:41",
+    "project_root":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)",
+    "status":  "pass",
+    "totals":  {
+                   "checks":  4,
+                   "files_missing":  0,
+                   "pattern_mismatches":  0
+               },
+    "results":  [
+                    {
+                        "file":  "deploy_production.sh",
+                        "absolute_path":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\deploy_production.sh",
+                        "exists":  true,
+                        "expected_pattern":  "OHIF Medical Imaging Viewer/Viewers/extensions/imagiax-ai/src",
+                        "found":  true,
+                        "sample_line":  "OHIF_EXT=\"OHIF Medical Imaging Viewer/Viewers/extensions/imagiax-ai/src\"",
+                        "rationale":  "Deploy script must still copy extension source from nested runtime path."
+                    },
+                    {
+                        "file":  "start_ohif.bat",
+                        "absolute_path":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\start_ohif.bat",
+                        "exists":  true,
+                        "expected_pattern":  "OHIF Medical Imaging Viewer\\\\Viewers",
+                        "found":  true,
+                        "sample_line":  "cd /d \"C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\OHIF Medical Imaging Viewer\\Viewers\"",
+                        "rationale":  "Local OHIF starter must still cd into nested Viewers runtime folder."
+                    },
+                    {
+                        "file":  "arrancar_ohif.py",
+                        "absolute_path":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\arrancar_ohif.py",
+                        "exists":  true,
+                        "expected_pattern":  "OHIF Medical Imaging Viewer\\\\Viewers\\\\platform\\\\app",
+                        "found":  true,
+                        "sample_line":  "ohif_dir = r\"C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\OHIF Medical Imaging Viewer\\Viewers\\platform\\app\"",
+                        "rationale":  "Python launcher must still reference nested Viewers platform app path."
+                    },
+                    {
+                        "file":  "OHIF Medical Imaging Viewer/orthanc-imagiax/start-imagiax.ps1",
+                        "absolute_path":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\OHIF Medical Imaging Viewer\\orthanc-imagiax\\start-imagiax.ps1",
+                        "exists":  true,
+                        "expected_pattern":  "OHIF Medical Imaging Viewer\\\\Viewers\\\\platform\\\\app",
+                        "found":  true,
+                        "sample_line":  "$OHIF_DIR = \"c:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\OHIF Medical Imaging Viewer\\Viewers\\platform\\app\"",
+                        "rationale":  "Orthanc stack launcher must keep OHIF_DIR in nested Viewers path."
+                    }
+                ]
+}

@@ -1,0 +1,36 @@
+﻿{
+    "generated_at":  "2026-04-25T12:35:35.9908000-04:00",
+    "source_root":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)",
+    "source_nested":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\OHIF Medical Imaging Viewer\\Viewers",
+    "root_ref":  {
+                     "head":  "75423a16f631b3fc62fa7762c2f934e2a0cb04de",
+                     "branch":  "backup/pre-audit-2026-04-13"
+                 },
+    "nested_ref":  {
+                       "head":  "b3e5f6469412aeb174969215162bd6c9fd689075",
+                       "branch":  "master"
+                   },
+    "included":  [
+                     "ohif/canonical/*",
+                     "ohif/mirror-snapshot/*",
+                     "evidence/docs-repo-curation/*",
+                     "evidence/scripts-repo-curation/*",
+                     "contracts/*",
+                     "manifest.json",
+                     "checksums-sha256.txt",
+                     "RUNBOOK.md"
+                 ],
+    "excluded":  [
+                     ".env",
+                     ".env.*",
+                     "*.sql",
+                     "db-backup-*",
+                     "service_account.json",
+                     ".sdd-temp/**",
+                     "tmp_work/**",
+                     "node_modules/**",
+                     "OHIF Medical Imaging Viewer/Viewers/.git/**",
+                     "PHI/raw-study-data/**"
+                 ],
+    "notes":  "Remote-safe snapshot only. Sensitive/local-only assets are intentionally excluded and preserved in local backup outside repo."
+}

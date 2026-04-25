@@ -1,0 +1,136 @@
+# Secretos y configuración local — NUNCA subir a git
+.env
+.env.production
+.env.local
+*.env.local
+*.env.*
+# Excepción: el template de ejemplo SÍ se versionea (no contiene secretos reales)
+!.env.example
+
+# SSH keys y certificados — NUNCA subir
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*.pub
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Modelos entrenados (grandes, no se versionan)
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Datos médicos — NUNCA subir (privacidad pacientes + tamaño)
+datos_nih/
+datos_hd/
+datos_medicos/
+rx tx_/
+RX Dicom Veridicos/
+*.dcm
+*.dicom
+imagiax_rx_mvp.ipynb
+
+# Reportes con datos de pacientes
+Reporte_IA_Pacientes_*.xlsx
+Reporte_Tecnico_*.pdf
+*.pdf
+
+# Claude AI — archivos internos de sesión
+.claude/
+
+# Agent registry/cache artifacts
+.atl/
+
+# Versiones antiguas del servidor (historial queda en git, no en archivos)
+servidor_api.py
+servidor_api_v2.py
+servidor_api_v3.py
+servidor_api_v4.py
+servidor_api_v5.py
+servidor_api_v6.py
+app_imagiax.py
+app_imagiax_v6.py
+imagiax_core.py
+v2_experimental/
+archive/
+
+# Scripts de desarrollo/utilidad temporales (movidos a scripts/)
+scripts/
+
+# Archivos de investigación/entrenamiento (movidos a research/)
+research/
+
+# Archivos de utilidad sueltos (compatibilidad con archivos no movidos aún)
+check_syntax*.py
+syntax_check*.py
+syntax_check*.bat
+syntax_test.py
+syntax_check_runner.py
+syntax_verify.py
+validate_syntax.py
+check_syntax_temp.py
+disk_usage_analysis.py
+run_disk_analysis.bat
+run_analysis.bat
+run_analysis.vbs
+extract_pdf.bat
+extract_pdf.vbs
+extract_pdf.py
+test_individual.py
+upload_test_images.py
+SYNTAX_AUDIT_REPORT.md
+verificar.ipynb
+
+# Archivos de texto sueltos
+noticia*.txt
+
+# Windows batch launchers locales (no aplican en servidor Linux)
+INICIAR-IMAGIAX.bat
+DETENER-IMAGIAX.bat
+
+# Node
+node_modules/
+
+# Imágenes de prueba y artefactos de entrenamiento
+*.png
+*.jpg
+*.jpeg
+auc_por_patologia.png
+evaluacion_final.png
+
+# OHIF Viewers — código fuente open source (se clona de github.com/OHIF/Viewers)
+# El directorio Viewers tiene su propio .git, se excluye como directorio completo.
+# La extensión imagiax-ai se agrega explícitamente vía git add -f.
+OHIF Medical Imaging Viewer/Viewers/
+OHIF Medical Imaging Viewer/.venv/
+
+# Docker — datos persistentes de contenedores
+orthanc-data/
+postgres-data/
+letsencrypt/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

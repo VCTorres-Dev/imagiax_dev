@@ -1,0 +1,529 @@
+/**
+ * IMAGIAX API Service
+ *
+ * Connects the OHIF panel to the IMAGIAX FastAPI backend (port 8010).
+ * Pipeline: DICOM → ResNet50-512 inference → Gemini LLM → clinical report.
+ */
+
+// ── Configuration ──────────────────────────────────────────────────────────────
+
+const API_BASE_URL =
+  (typeof window !== 'undefined' && (window as any).__IMAGIAX_API_URL__) ||
+  'http://localhost:8010';
+
+const API_V2_URL =
+  (typeof window !== 'undefined' && (window as any).__IMAGIAX_V2_API_URL__) ||
+  'http://localhost:8011';
+
+// Timeouts por tipo de operación (en milisegundos)
+const TIMEOUTS = {
+  DEFAULT: 30_000,        // 30 segundos para operaciones normales
+  GENERAR_INFORME: 600_000, // 10 minutos para inicio/confirmación de generación de informe
+  COMPARAR_V1V2: 180_000,   // 3 minutos para comparación V1 vs V2
+  JOB_STATUS: 30_000,       // 30 segundos por poll individual de estado
+} as const;
+
+// ── Types ──────────────────────────────────────────────────────────────────────
+
+export interface PatologiaInfo {
+  probabilidad_pct: number;
+  positivo: boolean;
+  umbral_pct?: number;
+}
+
+export interface HallazgoEstudio {
+  patologia: string;
+  probabilidad_pct_max: number;
+}
+
+export interface AIResultados {
+  scope: string;
+  study_instance_uid: string;
+  total_encontradas: number;
+  total_analizadas: number;
+  hallazgos_estudio: HallazgoEstudio[];
+  sin_hallazgos_estudio: boolean;
+  nivel_alerta: 'NORMAL' | 'BAJA' | 'MEDIA' | 'ALTA';
+  todas_patologias: Record<string, PatologiaInfo>;
+  errores: Array<{ orthanc_instance_id: string; error: string }>;
+  timestamp_utc: string;
+}
+
+export interface GenerarInformeResponse {
+  informe_id: string;
+  informe_texto: string;
+  ai_resultados: AIResultados;
+  modelo_llm: string;
+  creditos_restantes: number | null;
+  pago_automatico: PagoAutomaticoInfo | null;
+  advertencia: string;
+}
+
+export interface GenerarInformeAcceptedResponse {
+  job_id: string;
+  status: 'processing';
+}
+
+export type GenerarInformeResult = GenerarInformeResponse | GenerarInformeAcceptedResponse;
+
+export interface PagoAutomaticoInfo {
+  estado: 'approved' | 'rejected' | string;
+  payment_id: string | null;
+  monto_clp: number;
+  error: string | null;
+}
+
+export interface MetodoPagoResponse {
+  tiene_tarjeta: boolean;
+  metodo?: 'oneclick' | 'mp_card';
+  card_last4?: string;
+  card_brand?: string;
+  email?: string;
+}
+
+export interface EstadoCreditosResponse {
+  installation_id: string;
+  creditos_disponibles: number;
+  creditos_total: number;
+  es_trial: boolean;
+  tiene_suscripcion: boolean;
+  tiene_tarjeta: boolean;
+  card_last4: string | null;
+  activa: boolean;
+  pagar_url: string;
+  mensaje: string;
+}
+
+export interface GuardarDecisionResponse {
+  ok: boolean;
+  informe_id: string;
+  estado: string;
+  fue_editado: boolean;
+  timestamp_decision: string;
+  mensaje: string;
+}
+
+export interface InformeDB {
+  id: string;
+  study_instance_uid: string;
+  patient_id: string | null;
+  patient_name: string | null;
+  study_date: string | null;
+  modalidad: string | null;
+  ai_nivel_alerta: string;
+  ai_hallazgos: HallazgoEstudio[];
+  ai_todas_patologias: Record<string, PatologiaInfo>;
+  informe_generado: string;
+  informe_final: string | null;
+  modelo_llm: string;
+  estado: string;
+  fue_editado: boolean;
+  notas_rechazo: string | null;
+  timestamp_creacion: string;
+  timestamp_decision: string | null;
+}
+
+export interface SaludResponse {
+  estado: string;
+  servicio: string;
+  version: string;
+  modelo: string;
+  llm: string;
+  patologias: number;
+  dispositivo: string;
+  orthanc: { url: string; estado: string; nombre: string | null };
+  timestamp_utc: string;
+}
+
+// ── API Error ──────────────────────────────────────────────────────────────────
+
+export class ImagiaxApiError extends Error {
+  public readonly status: number;
+  public readonly detail: string;
+
+  constructor(status: number, detail: string) {
+    super(`IMAGIAX API error ${status}: ${detail}`);
+    this.name = 'ImagiaxApiError';
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+export class ImagiaxTimeoutError extends Error {
+  public readonly timeoutMs: number;
+
+  constructor(timeoutMs: number, endpoint: string) {
+    super(
+      `La solicitud a ${endpoint} excedió el tiempo límite de ${Math.round(timeoutMs / 1000)} segundos. ` +
+      `El análisis puede estar procesándose en el servidor. Por favor, espera un momento e intenta nuevamente.`
+    );
+    this.name = 'ImagiaxTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export function isGenerarInformeAcceptedResponse(
+  response: GenerarInformeResult
+): response is GenerarInformeAcceptedResponse {
+  return 'job_id' in response && response.status === 'processing';
+}
+
+// ── Auth state ─────────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  user_id: string;
+  email: string;
+  nombre: string;
+  rol: string;
+}
+
+const _AUTH_TOKEN_KEY = 'imagiax_auth_token_v1';
+const _AUTH_USER_KEY  = 'imagiax_auth_v1';
+
+let _token = '';
+let _onAuthExpired: (() => void) | null = null;
+
+// Restore token from storage on module load
+;(function _initAuth() {
+  try {
+    const t = localStorage.getItem(_AUTH_TOKEN_KEY);
+    if (t) _token = t;
+  } catch { /* SSR / no localStorage */ }
+})();
+
+export function setOnAuthExpired(cb: () => void): void { _onAuthExpired = cb; }
+export function isAuthenticated(): boolean { return !!_token; }
+
+export function getStoredUser(): AuthUser | null {
+  try {
+    const raw = localStorage.getItem(_AUTH_USER_KEY);
+    return raw ? (JSON.parse(raw) as AuthUser) : null;
+  } catch { return null; }
+}
+
+function _storeAuth(token: string, user: AuthUser): void {
+  _token = token;
+  try {
+    localStorage.setItem(_AUTH_TOKEN_KEY, token);
+    localStorage.setItem(_AUTH_USER_KEY, JSON.stringify(user));
+  } catch { /* storage full */ }
+}
+
+function _clearAuth(): void {
+  _token = '';
+  try {
+    localStorage.removeItem(_AUTH_TOKEN_KEY);
+    localStorage.removeItem(_AUTH_USER_KEY);
+  } catch { /* ignore */ }
+}
+
+export async function login(
+  email: string,
+  password: string
+): Promise<{ access_token: string; user: AuthUser }> {
+  const resp = await fetch(`${API_BASE_URL}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({})) as { detail?: string };
+    throw new ImagiaxApiError(resp.status, err.detail || 'Credenciales incorrectas');
+  }
+  const data = await resp.json() as { access_token: string; user: AuthUser };
+  _storeAuth(data.access_token, data.user);
+  return data;
+}
+
+export function logout(): void {
+  _clearAuth();
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Realiza una petición HTTP con timeout usando AbortController.
+ * @param path - Ruta del endpoint (ej: "/generar/informe")
+ * @param options - Opciones de fetch + timeout personalizado
+ * @param timeoutMs - Timeout en milisegundos (default: TIMEOUTS.DEFAULT)
+ */
+async function apiRequest<T>(
+  path: string,
+  options: RequestInit = {},
+  timeoutMs: number = TIMEOUTS.DEFAULT
+): Promise<T> {
+  const url = `${API_BASE_URL}${path}`;
+
+  // Crear AbortController para timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(_token ? { 'Authorization': `Bearer ${_token}` } : {}),
+        ...options.headers,
+      },
+    });
+
+    // Token expirado — limpiar sesión y notificar al panel
+    if (response.status === 401) {
+      _clearAuth();
+      if (_onAuthExpired) _onAuthExpired();
+      throw new ImagiaxApiError(401, 'Sesión expirada. Por favor, inicia sesión nuevamente.');
+    }
+
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const errorBody = await response.json() as { detail?: string; message?: string };
+        detail = errorBody.detail || errorBody.message || detail;
+      } catch {
+        // Non-JSON error body — use statusText
+      }
+      throw new ImagiaxApiError(response.status, detail);
+    }
+
+    return response.json() as Promise<T>;
+  } catch (error) {
+    // Detectar si el error es por abort (timeout)
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ImagiaxTimeoutError(timeoutMs, path);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ── API Functions ──────────────────────────────────────────────────────────────
+
+/**
+ * Health check — verifies model, Orthanc, and LLM are available.
+ */
+export async function checkSalud(): Promise<SaludResponse> {
+  return apiRequest<SaludResponse>('/salud');
+}
+
+/**
+ * Full pipeline: DICOM → AI inference → Gemini report → PostgreSQL persistence.
+ * Returns the generated report text, AI results, and the informe_id for tracking.
+ * 
+ * ⚠ Este endpoint puede tomar 30-90 segundos. Timeout: 2 minutos.
+ */
+export async function generarInforme(
+  studyInstanceUID: string,
+  maxInstances: number = 5
+): Promise<GenerarInformeResult> {
+  return apiRequest<GenerarInformeResult>(
+    '/generar/informe',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        study_instance_uid: studyInstanceUID,
+        max_instances: maxInstances,
+      }),
+    },
+    TIMEOUTS.GENERAR_INFORME // 5 minutos
+  );
+}
+
+/**
+ * Polls the backend async job created by POST /generar/informe when it returns 202.
+ * Returns either 202 { job_id, status: 'processing' } or the final generated report.
+ */
+export async function getEstadoGeneracionInforme(
+  jobId: string
+): Promise<GenerarInformeResult> {
+  return apiRequest<GenerarInformeResult>(
+    `/generar/informe/estado/${encodeURIComponent(jobId)}`,
+    { method: 'GET' },
+    TIMEOUTS.JOB_STATUS
+  );
+}
+
+/**
+ * Save the doctor's decision on a generated report.
+ *
+ * @param informeId  - UUID of the report
+ * @param estado     - 'aceptado' | 'rechazado' | 'editado_aceptado'
+ * @param informeFinal  - Modified report text (for editado_aceptado)
+ * @param notasRechazo  - Doctor's rejection notes
+ */
+export async function guardarDecision(
+  informeId: string,
+  estado: 'aceptado' | 'rechazado' | 'editado_aceptado',
+  informeFinal?: string,
+  notasRechazo?: string
+): Promise<GuardarDecisionResponse> {
+  return apiRequest<GuardarDecisionResponse>('/informes/guardar', {
+    method: 'POST',
+    body: JSON.stringify({
+      informe_id: informeId,
+      estado,
+      informe_final: informeFinal ?? null,
+      notas_rechazo: notasRechazo ?? null,
+    }),
+  });
+}
+
+/**
+ * Get all reports generated for a specific study.
+ */
+export async function getInformesPorEstudio(
+  studyInstanceUID: string
+): Promise<{ study_instance_uid: string; total: number; informes: InformeDB[] }> {
+  return apiRequest(`/informes/estudio/${encodeURIComponent(studyInstanceUID)}`);
+}
+
+/**
+ * List all reports, optionally filtered by estado.
+ */
+export async function listadoInformes(
+  estado?: string
+): Promise<{ total: number; filtro_estado: string | null; informes: InformeDB[] }> {
+  const query = estado ? `?estado=${encodeURIComponent(estado)}` : '';
+  return apiRequest(`/informes/listado${query}`);
+}
+
+// ══ V2 Experimental — NV-Reason-CXR-3B ═══════════════════════════════════════
+
+export interface V2PatologiaInfo {
+  max_pct: number;
+  positivo: boolean;
+  umbral_pct: number;
+}
+
+export interface V2Triage {
+  nivel_alerta: string;
+  hallazgos: Array<{ patologia: string; probabilidad_pct_max: number }>;
+  todas_patologias: Record<string, V2PatologiaInfo>;
+}
+
+export interface V2CompararResponse {
+  study_instance_uid: string;
+  v1_gemini: {
+    informe_es: string;
+    triage: { nivel_alerta: string; hallazgos: Array<{ patologia: string; probabilidad_pct_max: number }> };
+    latencia_s: number;
+    modelo_triage: string;
+    modelo_llm: string;
+  };
+  v2_cxr3b: {
+    informe_es: string;
+    triage: V2Triage;
+    thinking_en: string;
+    answer_en: string;
+    latencia_inferencia_s: number;
+    latencia_traduccion_s: number;
+    modelo_vision: string;
+    modelo_llm: string;
+  };
+  latencia_total_comparacion_s: number;
+}
+
+export interface V2SaludResponse {
+  estado: string;
+  version: string;
+  modelos: {
+    densenet121: string;
+    cxr3b: string;
+    cxr3b_4bit: boolean;
+  };
+  dispositivo: string;
+  timestamp_utc: string;
+}
+
+async function apiV2Request<T>(
+  path: string,
+  options: RequestInit = {},
+  timeoutMs: number = TIMEOUTS.DEFAULT
+): Promise<T> {
+  const url = `${API_V2_URL}${path}`;
+  
+  // Crear AbortController para timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+    });
+
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const errorBody = await response.json();
+        detail = errorBody.detail || errorBody.message || detail;
+      } catch { /* Non-JSON error body */ }
+      throw new ImagiaxApiError(response.status, detail);
+    }
+
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ImagiaxTimeoutError(timeoutMs, path);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/** Check if the V2 experimental server (port 8011) is running. */
+export async function checkSaludV2(): Promise<V2SaludResponse> {
+  return apiV2Request<V2SaludResponse>('/v2/salud');
+}
+
+/**
+ * Compare V1 (DenseNet121 + Gemini) vs V2 (NV-Reason-CXR-3B + Gemini) on the same study.
+ * Runs both pipelines independently and returns results side by side.
+ * 
+ * ⚠ Este endpoint puede tomar 60-120 segundos. Timeout: 3 minutos.
+ */
+export async function compararV1V2(
+  studyInstanceUID: string,
+  maxInstances: number = 1
+): Promise<V2CompararResponse> {
+  return apiV2Request<V2CompararResponse>(
+    '/v2/comparar',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        study_instance_uid: studyInstanceUID,
+        max_instances: maxInstances,
+      }),
+    },
+    TIMEOUTS.COMPARAR_V1V2 // 3 minutos
+  );
+}
+
+/**
+ * Returns the current credit status for this IMAGIAX installation.
+ * Used by the panel to display the credit counter and show payment CTA.
+ */
+export async function checkEstadoCreditos(): Promise<EstadoCreditosResponse> {
+  return apiRequest<EstadoCreditosResponse>('/pagos/estado');
+}
+
+/**
+ * Returns the registered card info for automatic billing (last4, brand, email).
+ */
+export async function getMetodoPago(): Promise<MetodoPagoResponse> {
+  return apiRequest<MetodoPagoResponse>('/pagos/metodo-pago');
+}
+
+/**
+ * Removes the registered card — deactivates automatic billing.
+ */
+export async function borrarMetodoPago(): Promise<{ ok: boolean; mensaje: string }> {
+  return apiRequest('/pagos/metodo-pago', { method: 'DELETE' });
+}
