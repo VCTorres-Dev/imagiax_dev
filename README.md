@@ -1,230 +1,153 @@
-# IMAGIAX — Plataforma de Soporte Radiológico con IA
+# IMAGIAX — Local Share Onboarding (Internal Only)
 
-> Sistema clínico de análisis automatizado de imágenes DICOM con inteligencia artificial, gestión de informes médicos y pagos integrados. Desplegado en producción en [imagiax.dev](https://imagiax.dev).
-
----
-
-## Arquitectura
-
-```
-                        ┌─────────────────────────────────────┐
-                        │           imagiax.dev (HTTPS)        │
-                        │         DigitalOcean Droplet          │
-                        │         2vCPU · 4GB RAM · Ubuntu      │
-                        └──────────────┬──────────────────────┘
-                                       │ nginx (80 / 443)
-                       ┌───────────────┼───────────────┐
-                       ▼               ▼               ▼
-               /api/ → FastAPI    /pacs/ → Orthanc    / → OHIF
-               (puerto 8010)     (puerto 8042)      (puerto 8080)
-                       │               │
-                       └───────┬───────┘
-                               ▼
-                          PostgreSQL 16
-                         (red interna Docker)
-```
-
-| Servicio | Tecnología | Rol |
-|----------|-----------|-----|
-| **fastapi** | Python 3.11 + FastAPI + PyTorch | API principal, análisis IA, pagos |
-| **orthanc** | Orthanc + plugins | PACS DICOM (almacenamiento y recuperación) |
-| **ohif** | OHIF v3 + extensión imagiax-ai | Visor DICOM web con panel IA |
-| **postgres** | PostgreSQL 16 | Base de datos (licencias, informes, pagos) |
-| **nginx** | nginx:alpine | Reverse proxy + SSL Let's Encrypt |
+> **INTERNAL / NON-PRODUCTION**: this README is for coworker local dev/demo onboarding only.
+> It documents current verified behavior (including blockers) and must not be used as a production/deploy runbook.
 
 ---
 
-## Funcionalidades principales
+## Scope of this README
 
-### Análisis radiológico IA
-- Modelo NIH multilabel (TorchXRayVision) para detección de 18 patologías en radiografía de tórax
-- Generación de informes médicos narrativos vía Gemini LLM
-- Niveles de alerta (normal / hallazgo leve / hallazgo significativo / crítico)
-- Soporte para instancias, series y estudios DICOM completos
+This onboarding package is intentionally limited to local sharing and reproducible dev/demo startup.
 
-### Informes médicos
-- Generación de PDF con datos del paciente, hallazgos y código QR de verificación
-- Página pública de verificación de autenticidad (`/api/informes/{id}/ver`)
-- Edición y firma por médico radiólogo
-- Historial por estudio DICOM
+- ✅ In scope: local launcher flow, local service checkpoints, known local blockers, troubleshooting.
+- ❌ Out of scope: deploy/prod hosting changes and operational procedures.
+- ❌ Out of scope: clinical AI core changes (AI engine, prompts, pathology logic, model behavior, inference pipeline).
 
-### Pagos
-- **MercadoPago** Checkout Pro: pago único y autopago por tarjeta registrada
-- **Transbank** Webpay Plus Mall: pago con tarjetas chilenas
-- Webhooks con validación de firma HMAC-SHA256
-- Exportación de historial en Excel (con gráficos) y CSV
-
-### Visor DICOM
-- OHIF v3 con extensión personalizada `imagiax-ai`
-- Panel lateral: resultados IA, generación de informe, descarga PDF, QR
-- Configuración dinámica vía `window.__IMAGIAX_CONFIG__`
+Guardrails reference: [`docs/onboarding/local-share-guardrails.md`](docs/onboarding/local-share-guardrails.md)
 
 ---
 
-## Estructura del repositorio
+## Source of truth (evidence-first)
 
-```
-imagiax_dev/
-├── servidor_api_orthanc_v1.py        # API FastAPI principal
-├── imagiax_db.py                     # Capa de datos — informes y estudios
-├── imagiax_pagos_db.py               # Capa de datos — pagos y licencias
-├── pagos_mp.py                       # Módulo MercadoPago (router FastAPI)
-├── pagos_tbk.py                      # Módulo Transbank (router FastAPI)
-├── requirements.txt                  # Dependencias Python
-├── Dockerfile                        # Build imagen FastAPI
-├── .dockerignore
-│
-├── OHIF Medical Imaging Viewer/
-│   └── orthanc-imagiax/
-│       ├── docker-compose.yml        # Stack de desarrollo local
-│       ├── docker-compose.prod.yml   # Stack de producción
-│       └── config/
-│           ├── nginx-proxy.conf      # Configuración nginx (reverse proxy + SSL)
-│           └── orthanc.json         # Configuración Orthanc PACS
-│
-└── ohif-extension-imagiax-ai/        # Extensión OHIF personalizada
-    ├── package.json
-    └── src/
-        ├── ImagiaxAiPanel.tsx        # Panel principal IA (React)
-        ├── services/imagiaxApi.ts    # Cliente HTTP hacia FastAPI
-        ├── index.tsx                 # Registro de extensión
-        └── ...
+All claims in this README are constrained to:
+
+1. Verified baseline evidence: [`docs/onboarding/local-baseline-verification.md`](docs/onboarding/local-baseline-verification.md)
+2. Current repository launcher/runtime files (`INICIAR-IMAGIAX.bat`, `start-imagiax.ps1`, `upload-dicoms.ps1`, local `docker-compose.yml`)
+
+If a claim cannot be tied to evidence (EV-* references), it is excluded.
+
+---
+
+## Project purpose (for this onboarding slice)
+
+Enable teammates to run the **current local IMAGIAX stack state** for internal dev/demo and understand exactly what is working vs currently blocked.
+
+Current-state runtime map: [`docs/onboarding/local-runtime-flow.md`](docs/onboarding/local-runtime-flow.md)
+
+---
+
+## Verified prerequisites (Windows machine used in baseline)
+
+| Requirement | Evidence | Status |
+|---|---|---|
+| Python 3.11 available (`py --version`) | Baseline §3 prerequisites table | ✅ Verified (`3.11.9`) |
+| Yarn available (`yarn --version`) | Baseline §3 prerequisites table | ✅ Verified (`1.22.22`) |
+| Docker CLI installed | Baseline §3 prerequisites table | ✅ Verified |
+| Docker daemon may need startup time | EV-002 startup output | ⚠️ Observed (auto-start attempted by launcher) |
+
+Evidence document: [`local-baseline-verification.md`](docs/onboarding/local-baseline-verification.md)
+
+---
+
+## Golden path (ordered local startup)
+
+### 1) Run the top-level launcher from repo root
+
+```powershell
+& ".\INICIAR-IMAGIAX.bat"
 ```
 
-> El directorio `OHIF Medical Imaging Viewer/Viewers/` (código fuente base de OHIF) no se versiona en este repo — se reconstruye con `bun install && bun run build` desde [OHIF/Viewers](https://github.com/OHIF/Viewers). Solo se versiona la extensión personalizada.
+Expected immediate behavior (verified):
 
----
+- Launcher starts and delegates to `start-imagiax.ps1` without the prior parenthesis-path parse crash (EV-010).
 
-## Variables de entorno
+### 2) Let `start-imagiax.ps1` execute its sequence
 
-El archivo `.env.production` **no se versiona** (contiene credenciales). Variables requeridas:
+Script order in current repo:
 
-```env
-# Google Gemini
-GEMINI_API_KEY=
+1. Docker engine check/start
+2. Orthanc container startup check
+3. PostgreSQL check
+4. OHIF startup (unless skipped)
+5. FastAPI `/ping` liveness check/start (unless skipped)
 
-# PostgreSQL
-POSTGRES_URL=postgresql://user:pass@postgres:5432/imagiax
-POSTGRES_PASSWORD=
+### 3) Manual checkpoints after launch attempt
 
-# Orthanc
-ORTHANC_BASE_URL=http://orthanc:8042
+Use these to classify the run:
 
-# URLs públicas
-IMAGIAX_BASE_URL=https://imagiax.dev/api
-CORS_ORIGINS=https://imagiax.dev,https://www.imagiax.dev
-IMAGIAX_VIEWER_URL=/
+| Checkpoint | Command / URL | Expected now |
+|---|---|---|
+| FastAPI liveness | `docker exec fastapi-imagiax ... /ping` | `200` when container is alive (EV-006, EV-012) |
+| FastAPI `/salud` | `docker exec fastapi-imagiax ... /salud` | `401` (auth-protected, not public liveness) (EV-006, EV-012) |
+| Orthanc UI | `http://localhost:8042` | May fail while `4242` bind issue persists (EV-002) |
+| OHIF | `http://localhost:3000` | Not reachable when Orthanc startup is blocked (EV-003) |
+| PostgreSQL readiness | `docker exec postgres-imagiax psql ... "select 1;"` | Returns `1` (EV-007) |
 
-# MercadoPago
-MP_PUBLIC_KEY=
-MP_ACCESS_TOKEN=
-MP_WEBHOOK_SECRET=
+### 4) Optional dataset dry-run check
 
-# Transbank
-TBK_ENVIRONMENT=integration   # o "production"
-TBK_MALL_COMMERCE_CODE=
-TBK_CHILD_COMMERCE_CODE=
-TBK_API_KEY=
-
-# Precio por análisis (CLP)
-IMAGIAX_PRECIO_SCAN=990
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "OHIF Medical Imaging Viewer\orthanc-imagiax\upload-dicoms.ps1" -DryRun
 ```
 
----
+Expected now:
 
-## Deploy en producción
-
-### Requisitos
-- Docker + Docker Compose v2
-- Dominio con DNS apuntando al servidor
-- Certificado SSL (Let's Encrypt vía Certbot)
-
-### Pasos
-```bash
-# 1. Clonar repo en el servidor
-git clone https://github.com/VCTorres-Dev/imagiax_dev.git
-
-# 2. Crear .env.production con las variables reales
-
-# 3. Levantar el stack
-cd "OHIF Medical Imaging Viewer/orthanc-imagiax"
-docker compose -f docker-compose.prod.yml up -d --build
-
-# 4. Verificar
-docker compose -f docker-compose.prod.yml ps
-curl https://imagiax.dev/api/salud
-```
-
-### Actualizar un servicio sin downtime
-```bash
-# Solo backend (rápido, ~2 min)
-docker compose -f docker-compose.prod.yml up -d --build fastapi
-
-# Solo visor OHIF (requiere rebuild, ~25 min)
-docker compose -f docker-compose.prod.yml up -d --build ohif
-```
+- Default sample paths resolve relative to current repository root (EV-011).
+- Upload remains blocked if Orthanc is not reachable (EV-008, EV-002).
 
 ---
 
-## Desarrollo local
+## Verified current state summary
 
-```bash
-# Levantar stack local (HTTP, sin SSL)
-cd "OHIF Medical Imaging Viewer/orthanc-imagiax"
-docker compose up -d --build
+### Verified working
 
-# API disponible en: http://localhost:8010
-# Visor OHIF en:    http://localhost:3000
-# Orthanc en:       http://localhost:8042
-# Docs Swagger:     http://localhost:8010/docs
-```
+- `INICIAR-IMAGIAX.bat` parse blocker fixed for paths with parentheses (EV-010).
+- PostgreSQL container readiness query works (`select 1`) (EV-007).
+- FastAPI internal liveness endpoint `/ping` returns 200 (EV-006, EV-012).
+- Upload script defaults are now repo-relative instead of machine-hardcoded (EV-011).
 
----
+### Verified failing / blocked
 
-## Endpoints principales
+- Orthanc host bind may fail on `0.0.0.0:4242` in this environment (EV-002).
+- OHIF host availability remains blocked in the failed Orthanc path (EV-003).
+- Full end-to-end local startup is not yet verified as successful on this baseline machine (EV-002, EV-003).
 
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| `GET` | `/salud` | Health check |
-| `POST` | `/analizar/estudio` | Analizar estudio DICOM completo |
-| `POST` | `/analizar/serie` | Analizar serie DICOM |
-| `POST` | `/analizar/instancia` | Analizar instancia DICOM |
-| `GET` | `/informes/listado` | Listar informes paginados |
-| `GET` | `/informes/{id}/ver` | Verificación pública de informe (QR) |
-| `GET` | `/pagar` | Portal de pagos |
-| `GET` | `/pagos/historial` | Historial de cobros |
-| `GET` | `/pagos/exportar-excel` | Exportar reporte Excel |
-| `GET` | `/docs` | Documentación Swagger UI |
+### Out of scope for onboarding changes
+
+- Any production/deploy behavior or hosting configuration.
+- Any clinical AI output behavior changes.
 
 ---
 
-## Stack tecnológico
+## Troubleshooting (known blockers)
 
-| Capa | Tecnología |
-|------|-----------|
-| Lenguaje backend | Python 3.11 |
-| Framework API | FastAPI + Uvicorn |
-| IA — visión | TorchXRayVision (NIH multilabel) |
-| IA — lenguaje | Google Gemini (google-genai) |
-| Base de datos | PostgreSQL 16 + asyncpg |
-| PACS | Orthanc + plugins |
-| Visor DICOM | OHIF v3 (React + TypeScript) |
-| Pagos | MercadoPago SDK + Transbank SDK |
-| Contenedores | Docker Compose |
-| Proxy / SSL | nginx + Let's Encrypt (Certbot) |
-| Infraestructura | DigitalOcean (Ubuntu 22.04) |
+Detailed limitations: [`docs/onboarding/local-current-limitations.md`](docs/onboarding/local-current-limitations.md)
 
----
+Quick triage list:
 
-## Seguridad
+1. **Orthanc bind failure on port 4242**
+   - Symptom: Docker error exposing `0.0.0.0:4242` (EV-002).
+   - Impact: Orthanc down → nginx/stack instability and OHIF unavailable in this run path (EV-005, EV-003).
 
-- Credenciales excluidas del repositorio via `.gitignore`
-- Datos médicos (DICOMs, reportes con pacientes) excluidos del repositorio
-- Webhooks MercadoPago validados con firma HMAC-SHA256
-- HTTPS obligatorio en producción (HTTP redirige automáticamente)
-- Rate limiting en endpoints de análisis IA
-- Transacciones atómicas con `FOR UPDATE SKIP LOCKED` para créditos
+2. **Health endpoint confusion (`/salud` vs `/ping`)**
+   - `/salud` currently returns 401 without auth (EV-006).
+   - Use `/ping` for liveness checks (EV-006, EV-012).
+
+3. **Upload script not completing end-to-end**
+   - Even with fixed default paths, upload cannot complete while Orthanc is unreachable (EV-008, EV-011).
 
 ---
 
-*Proyecto privado — todos los derechos reservados.*
+## What this README does NOT claim
+
+- It does **not** claim production readiness.
+- It does **not** claim coworker end-to-end success is already achieved on every machine.
+- It does **not** claim Orthanc bind blocker is resolved.
+
+---
+
+## Companion onboarding docs
+
+- Baseline evidence ledger: [`docs/onboarding/local-baseline-verification.md`](docs/onboarding/local-baseline-verification.md)
+- Scope guardrails / hold list: [`docs/onboarding/local-share-guardrails.md`](docs/onboarding/local-share-guardrails.md)
+- Runtime flow diagram (current state): [`docs/onboarding/local-runtime-flow.md`](docs/onboarding/local-runtime-flow.md)
+- Current limitations + operator troubleshooting: [`docs/onboarding/local-current-limitations.md`](docs/onboarding/local-current-limitations.md)
