@@ -48,45 +48,59 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 2) PostgreSQL connection pool -> stored in app.state.pool
     app.state.pool = await create_pool(settings.POSTGRES_URL)
 
-    # 3) Auth tables (JWT revocation log, login_attempts, etc.)
-    try:
-        from api.auth.service import create_auth_tables, cleanup_old_login_attempts
+    readonly_canary = settings.IMAGIAX_CANARY_READONLY
 
-        await create_auth_tables(app.state.pool)
-        await cleanup_old_login_attempts(app.state.pool)
-        logger.info("IMAGIAX Auth: tables verified/created.")
-    except Exception as exc:
-        logger.warning("IMAGIAX Auth: could not initialise auth tables.", exc_info=exc)
+    # 3) Auth tables (JWT revocation log, login_attempts, etc.)
+    if readonly_canary:
+        logger.warning("IMAGIAX Canary: skipping auth table migrations and login cleanup.")
+    else:
+        try:
+            from api.auth.service import create_auth_tables, cleanup_old_login_attempts
+
+            await create_auth_tables(app.state.pool)
+            await cleanup_old_login_attempts(app.state.pool)
+            logger.info("IMAGIAX Auth: tables verified/created.")
+        except Exception as exc:
+            logger.warning("IMAGIAX Auth: could not initialise auth tables.", exc_info=exc)
 
     # 3b) Bootstrap superadmin account from environment
-    try:
-        from api.auth.service import ensure_admin_exists, upsert_bootstrap_superadmin_from_env
-        await ensure_admin_exists(app.state.pool)
-        await upsert_bootstrap_superadmin_from_env(app.state.pool)
-        logger.info("IMAGIAX Auth: bootstrap admin verified.")
-    except Exception as exc:
-        logger.warning("IMAGIAX Auth: bootstrap admin check failed.", exc_info=exc)
+    if readonly_canary:
+        logger.warning("IMAGIAX Canary: skipping bootstrap admin checks.")
+    else:
+        try:
+            from api.auth.service import ensure_admin_exists, upsert_bootstrap_superadmin_from_env
+            await ensure_admin_exists(app.state.pool)
+            await upsert_bootstrap_superadmin_from_env(app.state.pool)
+            logger.info("IMAGIAX Auth: bootstrap admin verified.")
+        except Exception as exc:
+            logger.warning("IMAGIAX Auth: bootstrap admin check failed.", exc_info=exc)
 
     # 3c) Ensure patient_age column exists (BUG-008 migration)
-    try:
-        async with app.state.pool.acquire() as conn:
-            await conn.execute(
-                "ALTER TABLE informes ADD COLUMN IF NOT EXISTS patient_age VARCHAR(10) NULL"
-            )
-        logger.info("IMAGIAX: patient_age column ensured.")
-    except Exception as exc:
-        logger.warning("IMAGIAX: Could not ensure patient_age column: %s", exc)
+    if readonly_canary:
+        logger.warning("IMAGIAX Canary: skipping patient_age schema migration.")
+    else:
+        try:
+            async with app.state.pool.acquire() as conn:
+                await conn.execute(
+                    "ALTER TABLE informes ADD COLUMN IF NOT EXISTS patient_age VARCHAR(10) NULL"
+                )
+            logger.info("IMAGIAX: patient_age column ensured.")
+        except Exception as exc:
+            logger.warning("IMAGIAX: Could not ensure patient_age column: %s", exc)
 
     # 4) Payment tables + trial licence creation
-    try:
-        from infrastructure.pagos.db import create_tables, get_or_create_trial, get_or_create_installation_id
+    if readonly_canary:
+        logger.warning("IMAGIAX Canary: skipping payment table/trial initialisation.")
+    else:
+        try:
+            from infrastructure.pagos.db import create_tables, get_or_create_trial, get_or_create_installation_id
 
-        await create_tables(app.state.pool)
-        await get_or_create_trial(app.state.pool)
-        installation_id = await get_or_create_installation_id(app.state.pool)
-        logger.info("IMAGIAX Pagos: ready.", extra={"installation_id": installation_id})
-    except Exception as exc:
-        logger.warning("IMAGIAX Pagos: could not initialise payment tables.", exc_info=exc)
+            await create_tables(app.state.pool)
+            await get_or_create_trial(app.state.pool)
+            installation_id = await get_or_create_installation_id(app.state.pool)
+            logger.info("IMAGIAX Pagos: ready.", extra={"installation_id": installation_id})
+        except Exception as exc:
+            logger.warning("IMAGIAX Pagos: could not initialise payment tables.", exc_info=exc)
 
     # 5) Pre-load Jinja2 prompt templates from YAML files
     try:
@@ -139,16 +153,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.warning("IMAGIAX Auth: cleanup loop error — %s", _exc)
 
     import asyncio as _asyncio_main
-    _cleanup_task = _asyncio_main.create_task(_cleanup_loop(app.state.pool))
+    _cleanup_task = None
+    if readonly_canary:
+        logger.warning("IMAGIAX Canary: skipping periodic DB cleanup loop.")
+    else:
+        _cleanup_task = _asyncio_main.create_task(_cleanup_loop(app.state.pool))
 
     yield
 
     # -- Shutdown -------------------------------------------------------------
-    _cleanup_task.cancel()
-    try:
-        await _cleanup_task
-    except Exception:
-        pass
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except Exception:
+            pass
     if getattr(app.state, "orthanc", None):
         await app.state.orthanc.aclose()
     # app.state.pacs is an alias to app.state.orthanc — already closed above

@@ -73,10 +73,10 @@ if ($saludCode -ne "200") {
 }
 Pass "/salud=200"
 
-if ($frontendCode -ne "200") {
-    Warn "/config/frontend devolvió $frontendCode (esperado 200 en este runbook)."
-    Fail "/config/frontend no cumple el smoke mínimo"
+if ($frontendCode -ne "401") {
+    Warn "/config/frontend devolvió $frontendCode (esperado 401 sin sesión, igual que producción actual)."
+    Fail "/config/frontend no cumple el smoke mínimo de auth"
 }
-Pass "/config/frontend=200"
+Pass "/config/frontend=401 sin sesión"
 
 Write-Host "SMOKE CANARY: PASS ($BaseUrl)"

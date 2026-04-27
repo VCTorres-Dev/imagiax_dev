@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     IMAGIAX_BASE_URL: str = "http://localhost:8010"
     IMAGIAX_VIEWER_URL: str = "http://localhost:3000"
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Canary smoke mode: allow starting a candidate against production-like env
+    # without running startup migrations/bootstrap/cleanup jobs.
+    IMAGIAX_CANARY_READONLY: bool = False
 
     # Doctor / brand identity (exposed to frontend via /config endpoint)
     IMAGIAX_DOCTOR_NAME: str = ""

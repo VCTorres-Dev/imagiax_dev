@@ -75,6 +75,7 @@ docker run -d \
   --name fastapi-imagiax-canary \
   --network orthanc-imagiax_default \
   --env-file /root/imagiax/.env.production \
+  -e IMAGIAX_CANARY_READONLY=1 \
   -p 127.0.0.1:18010:8010 \
   -v /root/imagiax/service_account.json:/app/service_account.json:ro \
   -v orthanc-imagiax_torchxrayvision-cache:/home/imagiax/.torchxrayvision \
@@ -91,9 +92,9 @@ docker run -d \
 
 Validaciones:
 - `GET /salud` debe devolver `200`.
-- `GET /config/frontend` debe devolver `200`.
+- `GET /config/frontend` sin sesión debe devolver `401`, igual que producción actual.
 
-Si `/config/frontend` no devuelve `200`, tratar como señal de desalineación de configuración backend/frontend del canary y **bloquear avance** hasta diagnóstico.
+Si `/config/frontend` devuelve algo distinto de `401` sin autenticación, tratar como señal de desalineación auth/backend del canary y **bloquear avance** hasta diagnóstico.
 
 ### Manuales controlados
 
@@ -106,7 +107,7 @@ Si `/config/frontend` no devuelve `200`, tratar como señal de desalineación de
 Se considera canary válido cuando:
 
 1. `verify-canary-prereqs.ps1` pasa completo.
-2. `smoke-canary.ps1` pasa completo (`/salud` y `/config/frontend` en 200).
+2. `smoke-canary.ps1` pasa completo (`/salud=200` y `/config/frontend=401` sin sesión).
 3. Prueba manual de auth y flujo clínico controlado no reporta errores críticos.
 4. No se tocó nginx ni tráfico público durante toda la validación.
 
@@ -117,7 +118,7 @@ Cualquier condición siguiente implica rechazo de canary:
 - Puerto `18010` ocupado antes de levantar.
 - Runtime observado del contenedor productivo no contiene `api.main:create_app`.
 - Falla de `/salud`.
-- Falla de `/config/frontend`.
+- `/config/frontend` sin sesión no devuelve `401`.
 - Evidencia de desvío operativo (intento de reload nginx, restart de prod o reemplazo de `fastapi-imagiax`).
 
 ## Rollback / remoción segura
