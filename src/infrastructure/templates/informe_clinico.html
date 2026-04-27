@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Informe {{ informe_id }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ── Reset & print engine ─────────────────────────────────────────────── */
+@page { size: A4; margin: 0; }
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  font-family: 'Inter', Arial, 'Helvetica Neue', Helvetica, sans-serif !important;
+  font-size: 10pt;
+  color: rgb(17, 24, 39);
+  line-height: 1.58;
+  background: #fff;
+  margin: 0;
+  padding: 0;
+  -webkit-print-color-adjust: exact !important;
+  print-color-adjust: exact !important;
+}
+
+/* ── Page wrapper — sin min-height fijo ──────────────────────────────── */
+.page-wrapper {
+  padding: 28px 42px 24px;
+  width: 210mm;
+}
+@media print {
+  @page { size: A4; margin: 0; }
+  .page-wrapper { padding: 24px 40px 16px; }
+}
+
+/* ── Header ──────────────────────────────────────────────────────────── */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  border-bottom: 1px solid #d8e1ec;
+  background: #ffffff;
+  padding-bottom: 14px;
+  margin-bottom: 20px;
+}
+.header .institution-name {
+  font-size: 18px;
+  font-weight: 800;
+  color: rgb(15, 23, 42);
+  letter-spacing: 0.4px;
+  line-height: 1.2;
+}
+.header .institution-subtitle {
+  font-size: 8.8px;
+  color: rgb(100, 116, 139);
+  margin-top: 3px;
+  font-weight: 500;
+}
+.header .report-info {
+  text-align: right;
+  font-size: 9px;
+  color: rgb(100, 116, 139);
+}
+.header .report-info .report-id {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgb(26, 58, 94);
+  margin-bottom: 2px;
+}
+.header .footer-text {
+  font-size: 9px;
+  color: rgb(100, 116, 139);
+  margin-top: 1px;
+}
+
+/* ── Brand logo ──────────────────────────────────────────────────────── */
+.brand-logo {
+  height: 40px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+}
+
+/* ── Patient card (CSS Grid — Gold Standard) ─────────────────────────── */
+.patient-grid {
+  break-inside: avoid;
+  margin-bottom: 18px;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  border: 1px solid #dbe4ee;
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+  padding: 14px 18px;
+}
+.patient-grid .two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 24px;
+  margin-bottom: 6px;
+}
+.patient-grid .field-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.patient-grid .label {
+  font-size: 8.5px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  white-space: nowrap;
+}
+.patient-grid .value {
+  font-weight: 600;
+  font-size: 10.2px;
+  color: #0f172a;
+}
+.patient-grid .divider {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 8px 0 6px;
+}
+.patient-grid .medico-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+/* ── Clinical note ───────────────────────────────────────────────────── */
+.clinical-note {
+  break-inside: avoid;
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f1f7ff 100%);
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid rgb(26, 58, 94);
+  border-radius: 8px;
+}
+.clinical-note .title {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: rgb(26, 58, 94);
+  margin-bottom: 5px;
+}
+.clinical-note .body {
+  color: rgb(17, 24, 39);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* ── Report label ────────────────────────────────────────────────────── */
+.report-label {
+  font-weight: 700;
+  color: rgb(26, 58, 94);
+  font-size: 9pt;
+  margin-bottom: 12px;
+  padding-bottom: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+.exam-title {
+  text-align: center;
+  margin: 0 0 22px;
+}
+.exam-title span {
+  display: inline-block;
+  font-size: 12.8pt;
+  font-weight: 800;
+  color: #0f172a;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  padding-bottom: 4px;
+  border-bottom: 2px solid rgb(26, 58, 94);
+}
+
+/* ── Sections — break-inside: avoid para no cortar bloques ──────────── */
+.section {
+  margin-bottom: 4.8mm;
+  break-inside: avoid;
+}
+.section-title {
+  font-weight: 700;
+  font-size: 10pt;
+  color: rgb(26, 58, 94);
+  margin-bottom: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.45px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #dbe4ee;
+}
+.section-line {
+  font-size: 10pt;
+  color: rgb(17, 24, 39);
+  line-height: 1.62;
+  margin: 0;
+  padding: 0 0 1px;
+}
+.sub-header-prefix {
+  font-weight: 700;
+  color: rgb(26, 26, 26);
+}
+
+/* ── Conclusion box ──────────────────────────────────────────────────── */
+.conclusion-box {
+  break-inside: avoid;
+  margin-bottom: 5mm;
+  background: linear-gradient(180deg, rgb(243, 248, 255) 0%, rgb(235, 244, 255) 100%);
+  border: 1px solid rgb(147, 197, 253);
+  border-left: 3mm solid rgb(26, 58, 94);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+/* ── Firma — Gold Standard (espacio de trazo + línea limpia) ─────────── */
+.signature-block {
+  break-inside: avoid;
+  margin-top: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.signature-left {
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+}
+.signature-space {
+  height: 60px;          /* espacio en blanco para el trazo manuscrito */
+}
+.signature-line-bar {
+  border-top: 1px solid #cbd5e1;
+  padding-top: 7px;
+}
+.signature-line-bar .electronic-label {
+  font-size: 9px;
+  color: #94a3b8;
+  margin-bottom: 2px;
+}
+.signature-line-bar .name {
+  font-weight: 700;
+  font-size: 11px;
+  color: #0f172a;
+}
+.signature-line-bar .detail {
+  font-size: 9.5px;
+  color: #64748b;
+  margin-top: 1px;
+}
+.signature-line-bar .timestamp {
+  font-size: 8px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+
+/* ── QR vectorial ────────────────────────────────────────────────────── */
+.qr-block {
+  text-align: center;
+}
+.qr-svg-wrap {
+  width: 28mm;
+  min-width: 28mm;
+}
+.qr-svg-wrap svg {
+  width: 28mm !important;
+  height: 28mm !important;
+  display: block;
+  margin: 0 auto;
+}
+.qr-block .qr-label {
+  font-size: 8px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+</style>
+</head>
+<body>
+<div class="page-wrapper">
+
+  <!-- Header -->
+  <div class="header">
+    <div style="display:flex;align-items:center;gap:14px;">
+      {% if logo_b64 %}
+      <img class="brand-logo" src="data:image/png;base64,{{ logo_b64 }}" alt="Logo institucional" />
+      {% endif %}
+      <div>
+        <div class="institution-name">{{ institution_name }}</div>
+        <div class="institution-subtitle">{{ institution_subtitle }} &nbsp;·&nbsp; Informe Médico Radiológico &nbsp;·&nbsp; Confidencial</div>
+      </div>
+    </div>
+    <div class="report-info">
+      <div class="report-id">Informe #{{ informe_id }}</div>
+      <div class="footer-text">Examen: {{ fecha_examen }}</div>
+      <div class="footer-text">Generado: {{ fecha_informe }}</div>
+    </div>
+  </div>
+
+  <!-- Patient card — CSS Grid Gold Standard -->
+  <div class="patient-grid">
+    <div class="two-col">
+      <div>
+        <div class="field-row">
+          <span class="label">Paciente</span>
+          <span class="value">{{ patient_name }}</span>
+        </div>
+        <div class="field-row" style="margin-top:5px;">
+          <span class="label">Edad</span>
+          <span class="value">{{ patient_age if (patient_age and patient_age != '-') else 'No consignada' }}</span>
+        </div>
+        <div class="field-row" style="margin-top:5px;">
+          <span class="label">RUT</span>
+          <span class="value">{{ patient_rut }}</span>
+        </div>
+      </div>
+      <div>
+        <div class="field-row">
+          <span class="label">Modalidad</span>
+          <span class="value">{{ modalidad }}</span>
+        </div>
+        <div class="field-row" style="margin-top:5px;">
+          <span class="label">Fecha Examen</span>
+          <span class="value">{{ fecha_examen }}</span>
+        </div>
+      </div>
+    </div>
+    {% if medico_ref and medico_ref != '-' %}
+    <hr class="divider">
+    <div class="medico-row">
+      <span class="label">Médico Ref.</span>
+      <span class="value">{{ medico_ref }}</span>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Clinical Note -->
+  {% if nota_clinica %}
+  <div class="clinical-note">
+    <div class="title">Indicación Clínica</div>
+    <div class="body">{{ nota_clinica[:500] }}</div>
+  </div>
+  {% endif %}
+
+  <!-- Report Label -->
+  <div class="report-label">{{ report_label }}</div>
+
+  <div class="exam-title">
+    <span>{{ exam_title }}</span>
+  </div>
+
+  <!-- Sections — LIMITACIONES ya filtradas en pdf_service.py -->
+  {% for section in sections %}
+  {% if is_conclusion(section.title) %}
+  <div class="conclusion-box">
+    <div class="section-title">{{ section.title }}</div>
+    {% for line in section.lines %}
+    <div class="section-line">{{ line }}</div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="section">
+    <div class="section-title">{{ section.title }}</div>
+    {% for line in section.lines %}
+    <div class="section-line">{{ line }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endfor %}
+
+  <!-- Cierre -->
+  <div style="margin-top:12px;font-size:10pt;color:rgb(17,24,39);">Saluda Atentamente,</div>
+
+  <!-- Firma + QR — Gold Standard -->
+  <div class="signature-block">
+    <div class="signature-left">
+      <!-- Espacio de 60px para trazo manuscrito -->
+      <div class="signature-space"></div>
+      <!-- Línea limpia + datos del médico -->
+      <div class="signature-line-bar">
+        {% if doctor_name %}
+        <div class="electronic-label">Firmado electrónicamente por:</div>
+        <div class="name">{{ doctor_name }}</div>
+        {% if doctor_specialty %}
+        <div class="detail">{{ doctor_specialty }}</div>
+        {% endif %}
+        {% if doctor_license %}
+        <div class="detail">Lic. N° {{ doctor_license }}</div>
+        {% endif %}
+        <div class="timestamp">{{ now_iso }}</div>
+        {% else %}
+        <div style="font-weight:700;color:rgb(26,58,94);font-size:10px;">VALIDACIÓN MÉDICA REQUERIDA</div>
+        <div style="font-size:8.5px;color:#64748b;margin-top:3px;line-height:1.5;">
+          Informe generado por sistema IA IMAGIAX.<br>
+          Requiere revisión, validación y firma del radiólogo tratante.
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- QR vectorial SVG puro -->
+    {% if qr_svg_inline %}
+    <div class="qr-block qr-svg-wrap">
+      {{ qr_svg_inline|safe }}
+      <div class="qr-label">Escanee para verificar</div>
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+</body>
+</html>

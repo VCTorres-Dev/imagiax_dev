@@ -110,6 +110,7 @@ OHIF Medical Imaging Viewer/.venv/
 orthanc-data/
 postgres-data/
 letsencrypt/
+runtime-capture/
 
 # Logs
 *.log

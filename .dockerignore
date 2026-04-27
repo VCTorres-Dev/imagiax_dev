@@ -33,6 +33,9 @@ OHIF Medical Imaging Viewer/
 # Experimental
 v2_experimental/
 
+# Capturas locales de producción usadas solo para comparar baseline.
+runtime-capture/
+
 # Env files (se montan via env_file en compose)
 .env
 .env.production
