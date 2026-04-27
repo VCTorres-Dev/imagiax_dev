@@ -67,6 +67,18 @@ Importante: con el estado observado hoy, una rama cuyo `Dockerfile` apunte a `se
 4. Si las verificaciones pasan, construir una imagen etiquetada por commit.
 
 5. Validar la imagen nueva fuera de tráfico o con canary.
+   - Runbook de referencia: `docs/deploy/canary-runbook.md`
+   - Prerrequisitos de canary (solo lectura):
+
+     ```powershell
+     ./scripts/verify-canary-prereqs.ps1
+     ```
+
+   - Smoke mínimo de canary (solo lectura, ejecutado en host remoto vía SSH):
+
+     ```powershell
+     ./scripts/smoke-canary.ps1
+     ```
 
 6. Activar solo si health checks y smoke tests pasan.
 
