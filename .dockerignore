@@ -36,6 +36,9 @@ v2_experimental/
 # Capturas locales de producción usadas solo para comparar baseline.
 runtime-capture/
 
+# Artefactos locales de canary (tar de imágenes Docker, no enviar al build context).
+.canary-artifacts/
+
 # Env files (se montan via env_file en compose)
 .env
 .env.production

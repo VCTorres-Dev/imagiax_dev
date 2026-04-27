@@ -138,3 +138,40 @@ Reglas:
 - Nunca tocar nginx en esta fase.
 - Conservar referencia explícita de imagen productiva vigente para rollback operacional:
   - `sha256:a271ce9348ea5a338500b395441fb2a87950e8a9f554b518b7e5a7549130ee64`.
+
+## Ejecución registrada — 2026-04-27
+
+Se ejecutó una validación canary controlada desde el commit candidato:
+
+```text
+branch: deploy/canary-readonly-mode
+commit: 1c3abd769d2cfe362df6f538da354a7226eb961f
+imagen local/remota: imagiax-backend:canary-1c3abd7
+image id: sha256:f84e80020e81cd80c2deb56c2bf76012df38e78a02ab7f091e5c677575e50df1
+contenedor temporal: fastapi-imagiax-canary
+bind host: 127.0.0.1:18010 -> 8010
+modo: IMAGIAX_CANARY_READONLY=1
+```
+
+Resultado:
+
+```text
+canary /salud: 200
+canary /config/frontend sin sesión: 401
+canary health: healthy
+producción /api/salud: 200
+producción fastapi-imagiax: healthy
+nginx siguió apuntando a fastapi:8010, no al canary
+```
+
+Logs esperados observados en canary:
+
+```text
+IMAGIAX Canary: skipping auth table migrations and login cleanup.
+IMAGIAX Canary: skipping bootstrap admin checks.
+IMAGIAX Canary: skipping patient_age schema migration.
+IMAGIAX Canary: skipping payment table/trial initialisation.
+IMAGIAX Canary: skipping periodic DB cleanup loop.
+```
+
+Después de capturar evidencia, el contenedor `fastapi-imagiax-canary` fue removido para no dejar carga extra en el host. La imagen canary y el tar de artefacto pueden permanecer como referencia hasta decidir limpieza o siguiente fase.

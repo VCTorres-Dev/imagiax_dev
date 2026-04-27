@@ -111,6 +111,7 @@ orthanc-data/
 postgres-data/
 letsencrypt/
 runtime-capture/
+.canary-artifacts/
 
 # Logs
 *.log
