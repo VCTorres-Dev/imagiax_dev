@@ -1,0 +1,37 @@
+# Secrets / local config
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+service_account.json
+
+# Medical data / PHI / datasets
+*.dcm
+*.dicom
+rx tx_/
+datos_medicos/
+datos_hd/
+RX Dicom Veridicos/
+db-backup-*.sql
+
+# Generated / local artifacts
+__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+venv/
+dist/
+build/
+.sdd-temp/
+_backup/
+_quarantine/
+tmp_*
+nul
+
+# Binary/media assets not needed for code-reading package
+*.png
+*.jpg
+*.jpeg
+*.pdf

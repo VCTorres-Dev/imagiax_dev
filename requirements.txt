@@ -1,0 +1,40 @@
+# ============================================================
+# IMAGIAX — Dependencias del backend FastAPI
+# Generado con versiones exactas del entorno local (2026-03-22)
+#
+# NOTA: torch y torchvision se instalan POR SEPARADO en el Dockerfile
+# usando --index-url https://download.pytorch.org/whl/cpu (ARM64/CPU)
+# ============================================================
+
+fastapi==0.129.0
+uvicorn[standard]==0.41.0
+python-multipart==0.0.20
+httpx==0.28.1
+python-dotenv==1.2.2
+pydantic==2.12.5
+pydicom==3.0.1
+asyncpg==0.31.0
+google-genai==1.66.0
+
+# Procesamiento de imágenes — headless para entorno Docker sin display
+opencv-python-headless==4.13.0.92
+scikit-image==0.26.0
+scikit-learn==1.8.0
+Pillow==12.0.0
+numpy==2.3.5
+
+# Modelos de IA
+torchxrayvision==1.4.0
+grad-cam==1.5.5
+
+# Pagos
+mercadopago==2.3.0
+transbank-sdk==6.1.0
+
+# Autenticación JWT
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+# Exportación de reportes
+openpyxl==3.1.5

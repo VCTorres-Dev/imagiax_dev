@@ -1,0 +1,37 @@
+{
+    "generated_at":  "2026-04-25T03:21:41",
+    "project_root":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)",
+    "canonical_source":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\ohif-extension-imagiax-ai\\src",
+    "runtime_mirror":  "C:\\Users\\WinterOS\\Documents\\Workspace\\IMAGIAX - copia (2)\\OHIF Medical Imaging Viewer\\Viewers\\extensions\\imagiax-ai\\src",
+    "totals":  {
+                   "canonical_files":  9,
+                   "mirror_files":  8,
+                   "shared_files":  8,
+                   "hash_matches":  6,
+                   "hash_mismatches":  2,
+                   "canonical_only":  1,
+                   "mirror_only":  0
+               },
+    "canonical_only":  [
+                           "pipelineConfig.ts"
+                       ],
+    "mirror_only":  [
+
+                    ],
+    "hash_mismatches":  [
+                            {
+                                "relative_path":  "ImagiaxAiPanel.tsx",
+                                "canonical_sha256":  "940730df53e95dac5fc7d645f018b9afd2761a800fec8d8d06786bf15abc899d",
+                                "mirror_sha256":  "a438d53e1db005099c02653b3301493b8efdb7c2ee50071f39ab4e2ef8664815",
+                                "canonical_bytes":  103829,
+                                "mirror_bytes":  123080
+                            },
+                            {
+                                "relative_path":  "services/imagiaxApi.ts",
+                                "canonical_sha256":  "041b3b97538bbf3b1cd0c2729c0ccd2653f7c11f751ecc8b97606110c1b037ae",
+                                "mirror_sha256":  "dc56901738f0b8477f17cbc290c1adda5e3c37a8aa1c54a6ad185c6974b8a9d0",
+                                "canonical_bytes":  15999,
+                                "mirror_bytes":  18232
+                            }
+                        ]
+}
