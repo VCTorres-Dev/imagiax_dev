@@ -81,13 +81,13 @@ OHIF Medical Imaging Viewer/nul
 
 4. Confirmar que el diff contiene solo allowlist.
 
-5. Confirmar que README y matriz explican:
+5. Confirmar que README y docs base explican:
 
-   - qué corre hoy;
-   - qué está en transición;
-   - qué no se puede prometer;
-   - qué no debe ejecutarse como deploy.
+   - qué hace IMAGIAX;
+   - cómo se recorre el flujo principal;
+   - qué archivos conviene leer primero;
+   - qué archivos son foco principal y cuáles quedan como contexto.
 
 ## Resultado esperado
 
-Una rama que permita leer el sistema con honestidad, sin filtrar secretos ni dar la impresión falsa de que todo está listo para producción o local full-stack.
+Una rama que permita leer el sistema con honestidad, sin filtrar secretos y sin mezclar material ajeno al objetivo de revisión técnica.
