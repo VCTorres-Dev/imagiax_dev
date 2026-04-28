@@ -27,6 +27,59 @@ from app.core.middleware import setup_middleware
 logger = logging.getLogger("imagiax")
 
 
+def _config_source(*, env_keys: list[str], current_value: object, default_value: object | None = None) -> str:
+    """Return configuration source as runtime|env|default (non-secret aware)."""
+    for key in env_keys:
+        val = os.getenv(key)
+        if val is not None and str(val).strip() != "":
+            return "env"
+    if default_value is not None and current_value == default_value:
+        return "default"
+    return "runtime"
+
+
+def _gemini_health_payload() -> dict[str, object]:
+    """Build Gemini health payload without exposing secrets."""
+    api_key_configured = bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.get_secret_value())
+    vertex_project_configured = bool((settings.VERTEX_AI_PROJECT or "").strip())
+    service_account_configured = bool((settings.GOOGLE_APPLICATION_CREDENTIALS or "").strip())
+
+    mode_raw = settings.gemini_auth_mode
+    if mode_raw == "api_key":
+        auth_mode = "api_key"
+        estado = "ok"
+        semaforo = "green"
+        reason = "Gemini configurado por API key."
+    elif mode_raw == "vertex_ai":
+        auth_mode = "vertex_service_account"
+        if vertex_project_configured and service_account_configured:
+            estado = "ok"
+            semaforo = "green"
+            reason = "Gemini configurado por Vertex AI con service account."
+        else:
+            estado = "degradado"
+            semaforo = "yellow"
+            reason = "Falta VERTEX_AI_PROJECT o GOOGLE_APPLICATION_CREDENTIALS para Vertex AI."
+    else:
+        auth_mode = "unconfigured"
+        estado = "error"
+        semaforo = "red"
+        reason = "Gemini no configurado: faltan API key y credenciales Vertex."
+
+    return {
+        "estado": estado,
+        "semaforo": semaforo,
+        "auth_mode": auth_mode,
+        "modelo": settings.GEMINI_MODEL,
+        "reason": reason,
+        "checks": {
+            "api_key_configured": api_key_configured,
+            "vertex_project_configured": vertex_project_configured,
+            "service_account_configured": service_account_configured,
+        },
+    }
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage startup and shutdown tasks for the IMAGIAX application."""
@@ -248,6 +301,7 @@ def create_app() -> FastAPI:
         """Detailed health diagnostics — requires admin role."""
         from datetime import datetime, timezone
 
+        now_iso = datetime.now(timezone.utc).isoformat()
         estado = "ok"
         componentes: dict = {}
 
@@ -275,10 +329,10 @@ def create_app() -> FastAPI:
         componentes["orthanc"] = {"estado": orthanc_estado, "url": orthanc_url}
 
         # Gemini IA check
-        gemini_key = settings.GEMINI_API_KEY.get_secret_value() if settings.GEMINI_API_KEY else ""
-        gemini_modelo = settings.GEMINI_MODEL
-        gemini_estado = "configurado" if gemini_key else "no_configurado"
-        componentes["gemini"] = {"estado": gemini_estado, "modelo": gemini_modelo}
+        gemini_payload = _gemini_health_payload()
+        if gemini_payload["estado"] != "ok" and estado == "ok":
+            estado = "degradado"
+        componentes["gemini"] = gemini_payload
 
         # AI model (ResNet/TorchXRayVision) check
         model_loaded = getattr(request.app.state, "model", None) is not None
@@ -292,13 +346,61 @@ def create_app() -> FastAPI:
         except Exception:
             patologias = "—"
 
+        configuracion = {
+            "version": {
+                "valor": app.version,
+                "fuente": "runtime",
+                "refrescado_en": now_iso,
+            },
+            "servicio": {
+                "valor": "IMAGIAX",
+                "fuente": "runtime",
+                "refrescado_en": now_iso,
+            },
+            "gemini_model": {
+                "valor": settings.GEMINI_MODEL,
+                "fuente": _config_source(env_keys=["GEMINI_MODEL"], current_value=settings.GEMINI_MODEL, default_value="gemini-2.5-flash"),
+                "refrescado_en": now_iso,
+            },
+            "gemini_auth_mode": {
+                "valor": gemini_payload.get("auth_mode", "unconfigured"),
+                "fuente": "runtime",
+                "refrescado_en": now_iso,
+            },
+            "gemini_credentials": {
+                "valor": {
+                    "api_key_configured": gemini_payload.get("checks", {}).get("api_key_configured", False),
+                    "vertex_project_configured": gemini_payload.get("checks", {}).get("vertex_project_configured", False),
+                    "service_account_configured": gemini_payload.get("checks", {}).get("service_account_configured", False),
+                },
+                "fuente": "runtime",
+                "refrescado_en": now_iso,
+            },
+            "vertex_project": {
+                "valor": settings.VERTEX_AI_PROJECT or "—",
+                "fuente": _config_source(env_keys=["VERTEX_AI_PROJECT"], current_value=settings.VERTEX_AI_PROJECT),
+                "refrescado_en": now_iso,
+            },
+            "service_account_path": {
+                "valor": settings.GOOGLE_APPLICATION_CREDENTIALS or "—",
+                "fuente": _config_source(env_keys=["GOOGLE_APPLICATION_CREDENTIALS"], current_value=settings.GOOGLE_APPLICATION_CREDENTIALS),
+                "refrescado_en": now_iso,
+            },
+            "pathologias": {
+                "valor": patologias,
+                "fuente": "runtime",
+                "refrescado_en": now_iso,
+            },
+        }
+
         return {
             "estado": estado,
             "version": app.version,
             "servicio": "IMAGIAX",
             "patologias": patologias,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "timestamp_utc": now_iso,
             "componentes": componentes,
+            "configuracion": configuracion,
         }
 
     # /config/frontend — public config for OHIF + frontend JS

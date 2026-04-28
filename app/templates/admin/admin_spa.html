@@ -1336,6 +1336,8 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
           </div>
         </div>
 
+        <div id="dashboard-metadata" class="alert alert-info" style="display:none;margin-bottom:20px"></div>
+
         <!-- Charts row -->
         <div class="charts-row">
           <!-- Distribución por rol -->
@@ -1645,6 +1647,10 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
       </div>
     </div>
     <div class="modal-informe-footer">
+      <button onclick="previewInformePDF(window._currentInformeId)" class="btn btn-ghost btn-sm">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        Previsualizar PDF
+      </button>
       <button onclick="downloadInformePDF(window._currentInformeId)" class="btn btn-ghost btn-sm">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Descargar PDF
@@ -2254,6 +2260,8 @@ async function loadDashboard() {
   const res = await api('GET', '/admin/api/stats');
   if (!res || !res.ok) return;
   const d = await res.json();
+  const meta = d._metadata || {};
+  const freshness = meta.freshness || {};
 
   document.getElementById('s-users').textContent = d.usuarios.activos;
   document.getElementById('s-users-sub').textContent = `${d.usuarios.total} total (${d.usuarios.inactivos} inactivos)`;
@@ -2270,6 +2278,23 @@ async function loadDashboard() {
   if (d.informes.pendiente > 0) {
     document.getElementById('badge-pendientes').textContent = d.informes.pendiente;
     document.getElementById('badge-pendientes').style.display = 'inline-block';
+  } else {
+    document.getElementById('badge-pendientes').style.display = 'none';
+  }
+
+  const dashboardMetaEl = document.getElementById('dashboard-metadata');
+  if (dashboardMetaEl && meta && Object.keys(meta).length > 0) {
+    const refreshedAt = meta.refreshed_at ? formatDate(meta.refreshed_at) : '—';
+    const freshStatus = freshness.status || 'unknown';
+    const age = Number.isFinite(freshness.age_seconds) ? `${freshness.age_seconds}s` : '—';
+    const cacheState = freshness.cache || '—';
+    const informesProv = meta.provenance && meta.provenance.informes ? meta.provenance.informes : null;
+    const provSource = informesProv && informesProv.source ? informesProv.source : '—';
+    const provScope = informesProv && informesProv.scope ? informesProv.scope : '—';
+    dashboardMetaEl.style.display = 'flex';
+    dashboardMetaEl.innerHTML =
+      `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`
+      + `<span><strong>Datos dashboard:</strong> ${escHtml(freshStatus)} · edad ${escHtml(age)} · cache ${escHtml(cacheState)} · fuente ${escHtml(provSource)} · scope ${escHtml(provScope)} · actualizado ${escHtml(refreshedAt)}</span>`;
   }
 
   // Role chart
@@ -2488,6 +2513,10 @@ async function loadInformes(offset) {
       <td style="font-size:12px" class="col-hide-sm">${i.cobro_estado === 'pagado' ? '<span style="color:var(--green)">'+((i.cobro_monto_clp||0).toLocaleString("es-CL"))+'</span>' : '<span style="color:var(--text3)">'+i.cobro_estado+'</span>'}</td>
       <td style="font-size:12px;color:var(--text3)">${formatDate(i.created_at)}</td>
       <td class="td-actions">
+        <button class="btn btn-ghost btn-sm" onclick="previewInformePDF('${escHtml(i.id)}')" title="Previsualizar PDF en navegador">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          Preview
+        </button>
         <button class="btn btn-ghost btn-sm" onclick="openInformeModal('${escHtml(i.id)}')" title="Ver informe">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           Ver
@@ -2612,7 +2641,32 @@ function closeInformeModal() {
 
 function downloadInformePDF(id) {
   if (!id) return;
-  window.open(`/admin/api/informes/${encodeURIComponent(id)}/pdf`, '_blank');
+  window.open(`/admin/api/informes/${encodeURIComponent(id)}/pdf?mode=download`, '_blank', 'noopener,noreferrer');
+}
+
+function previewInformePDF(id) {
+  if (!id) return;
+  const previewUrl = `/admin/api/informes/${encodeURIComponent(id)}/pdf?mode=inline`;
+  const fallbackUrl = `/admin/api/informes/${encodeURIComponent(id)}/pdf?mode=download`;
+  const previewWindow = window.open(previewUrl, '_blank', 'noopener,noreferrer');
+  if (!previewWindow) {
+    showToast('No se pudo abrir previsualización (popup bloqueado). Descargando PDF...', 'info');
+    window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  try {
+    setTimeout(() => {
+      try {
+        if (previewWindow.closed) {
+          window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+        }
+      } catch (_) {
+        // Cross-origin access can fail in some browsers; keep silent fallback.
+      }
+    }, 1500);
+  } catch (_) {
+    window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+  }
 }
 
 function _informeTrapFocus(e) {
@@ -2741,23 +2795,59 @@ async function loadSistema() {
     }
     const d = await res.json();
     const comp = d.componentes || {};
+    const cfg = d.configuracion || {};
     const pgOk = comp.postgresql && comp.postgresql.estado === 'ok';
     const orthancOk = comp.orthanc && comp.orthanc.estado === 'ok';
     const apiOk = d.estado === 'ok' || d.estado === 'degradado';
+    const gemini = comp.gemini || {};
+    const geminiSem = gemini.semaforo || (gemini.estado === 'ok' ? 'green' : (gemini.estado === 'degradado' ? 'yellow' : 'red'));
+    const geminiBadge = geminiSem === 'green' ? 'badge-green' : (geminiSem === 'yellow' ? 'badge-yellow' : 'badge-red');
+
+    const topStatus = document.getElementById('sys-status');
+    if (topStatus) {
+      topStatus.classList.remove('badge-green', 'badge-yellow', 'badge-red');
+      if (d.estado === 'ok') {
+        topStatus.classList.add('badge-green');
+        topStatus.textContent = 'Sistema activo';
+      } else if (d.estado === 'degradado') {
+        topStatus.classList.add('badge-yellow');
+        topStatus.textContent = 'Sistema degradado';
+      } else {
+        topStatus.classList.add('badge-red');
+        topStatus.textContent = 'Sistema con incidentes';
+      }
+    }
+
     document.getElementById('sys-services').innerHTML =
       '<div style="display:flex;flex-direction:column;gap:10px">'
       + svcRow('API FastAPI', apiOk, 'Estado: ' + (d.estado || '\u2014'))
       + svcRow('PostgreSQL', pgOk, comp.postgresql ? (comp.postgresql.estado || '\u2014') : 'No disponible')
       + svcRow('Orthanc PACS', orthancOk, comp.orthanc ? (comp.orthanc.url || '') : 'No disponible')
-      + svcRow('Gemini IA', !!(comp.gemini && comp.gemini.estado === 'configurado'), comp.gemini ? comp.gemini.modelo || '\u2014' : 'No configurado')
+      + `<div class="svc-row">
+          <div class="svc-dot ${geminiSem === 'green' ? 'ok' : (geminiSem === 'yellow' ? 'warn' : 'error')}"></div>
+          <div class="svc-name">Gemini IA</div>
+          <div class="svc-detail">${escHtml(gemini.auth_mode || 'unconfigured')} · ${escHtml(gemini.modelo || '\u2014')}</div>
+          <span class="badge-pill ${geminiBadge}" style="flex-shrink:0">${escHtml((gemini.reason || gemini.estado || 'Sin diagnóstico').toString())}</span>
+        </div>`
       + '</div>';
+
+    const cfgVersion = cfg.version || {};
+    const cfgService = cfg.servicio || {};
+    const cfgModel = cfg.gemini_model || {};
+    const cfgMode = cfg.gemini_auth_mode || {};
+    const cfgCreds = cfg.gemini_credentials || {};
+    const cfgPath = cfg.service_account_path || {};
+    const cfgPathos = cfg.pathologias || {};
     document.getElementById('sys-config').innerHTML =
       '<div style="display:flex;flex-direction:column;gap:10px">'
-      + cfgRow('Versión', d.version || '\u2014')
-      + cfgRow('Servicio', d.servicio || 'IMAGIAX')
-      + cfgRow('Modelo IA', comp.gemini ? comp.gemini.modelo || '\u2014' : '\u2014')
-      + cfgRow('Patologías IA', d.patologias || '\u2014')
-      + cfgRow('Timestamp', d.timestamp_utc ? new Date(d.timestamp_utc).toLocaleString('es-CL') : '\u2014')
+      + cfgRow('Versión', d.version || '\u2014', cfgVersion.fuente, cfgVersion.refrescado_en)
+      + cfgRow('Servicio', d.servicio || 'IMAGIAX', cfgService.fuente, cfgService.refrescado_en)
+      + cfgRow('Modelo IA', (comp.gemini ? comp.gemini.modelo : null) || cfgModel.valor || '\u2014', cfgModel.fuente, cfgModel.refrescado_en)
+      + cfgRow('Auth Gemini', gemini.auth_mode || cfgMode.valor || 'unconfigured', cfgMode.fuente, cfgMode.refrescado_en)
+      + cfgRow('Credenciales', summarizeGeminiCreds(cfgCreds.valor), cfgCreds.fuente, cfgCreds.refrescado_en)
+      + cfgRow('Service account path', cfgPath.valor || '\u2014', cfgPath.fuente, cfgPath.refrescado_en)
+      + cfgRow('Patologías IA', d.patologias || cfgPathos.valor || '\u2014', cfgPathos.fuente, cfgPathos.refrescado_en)
+      + cfgRow('Timestamp', d.timestamp_utc ? new Date(d.timestamp_utc).toLocaleString('es-CL') : '\u2014', 'runtime', d.timestamp_utc)
       + '</div>';
   } catch(e) {
     console.error('[Sistema] Error al cargar /salud/detalle:', e);
@@ -2769,18 +2859,32 @@ async function loadSistema() {
 }
 
 function svcRow(name, ok, desc) {
+  const safeName = escHtml(name);
+  const safeDesc = escHtml(desc);
   return `<div class="svc-row">
     <div class="svc-dot ${ok ? 'ok' : 'error'}"></div>
-    <div class="svc-name">${name}</div>
-    <div class="svc-detail">${desc}</div>
+    <div class="svc-name">${safeName}</div>
+    <div class="svc-detail">${safeDesc}</div>
     <span class="badge-pill ${ok ? 'badge-green' : 'badge-red'}" style="flex-shrink:0">${ok ? 'Activo' : 'Error'}</span>
   </div>`;
 }
-function cfgRow(k, v) {
+function cfgRow(k, v, fuente, refrescadoEn) {
+  const safeK = escHtml(k);
+  const safeV = escHtml(v);
+  const fuenteText = fuente ? ` · fuente: ${escHtml(fuente)}` : '';
+  const refreshedText = refrescadoEn ? ` · actualizado: ${formatDate(refrescadoEn)}` : '';
   return `<div class="cfg-row">
-    <span class="cfg-key">${k}</span>
-    <span class="cfg-val">${v}</span>
+    <span class="cfg-key">${safeK}</span>
+    <span class="cfg-val">${safeV}${fuenteText}${refreshedText}</span>
   </div>`;
+}
+
+function summarizeGeminiCreds(value) {
+  if (!value || typeof value !== 'object') return '—';
+  const api = value.api_key_configured ? 'api_key:yes' : 'api_key:no';
+  const vertex = value.vertex_project_configured ? 'vertex_project:yes' : 'vertex_project:no';
+  const sa = value.service_account_configured ? 'service_account:yes' : 'service_account:no';
+  return `${api} · ${vertex} · ${sa}`;
 }
 
 // ── Modales ────────────────────────────────────────────────────────────────────

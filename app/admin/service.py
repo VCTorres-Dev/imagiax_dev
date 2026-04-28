@@ -8,6 +8,7 @@ No global pool. admin/ MUST NOT import from pagos or ai modules.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import time
 from typing import Any
 
@@ -19,6 +20,14 @@ _CACHE_TTL = 30  # seconds
 _dashboard_cache: dict = {"data": None, "ts": 0.0}
 _pagos_cache: dict = {"data": None, "ts": 0.0}
 
+
+def _freshness_status(age_seconds: float, *, ttl_seconds: int) -> str:
+    if age_seconds <= ttl_seconds:
+        return "fresh"
+    if age_seconds <= (ttl_seconds * 3):
+        return "stale"
+    return "degraded"
+
 async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, Any]:
     """Estadisticas generales del sistema para el dashboard de admin.
 
@@ -29,7 +38,41 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, Any]:
     """
     now = time.monotonic()
     if _dashboard_cache["data"] is not None and (now - _dashboard_cache["ts"]) < _CACHE_TTL:
-        return _dashboard_cache["data"]
+        result = dict(_dashboard_cache["data"])
+        age_seconds = max(0.0, now - _dashboard_cache["ts"])
+        metadata = {
+            "refreshed_at": datetime.now(timezone.utc).isoformat(),
+            "freshness": {
+                "status": _freshness_status(age_seconds, ttl_seconds=_CACHE_TTL),
+                "age_seconds": round(age_seconds, 3),
+                "ttl_seconds": _CACHE_TTL,
+                "cache": "hit",
+            },
+            "provenance": {
+                "usuarios": {
+                    "metric_key": "usuarios",
+                    "source": "postgresql.usuarios",
+                    "scope": "all_users",
+                    "definitions": {
+                        "total": "COUNT(*) en usuarios",
+                        "activos": "COUNT(*) WHERE activo = TRUE",
+                        "inactivos": "total - activos",
+                    },
+                },
+                "informes": {
+                    "metric_key": "informes",
+                    "source": "postgresql.informes",
+                    "scope": "all_reports",
+                    "definitions": {
+                        "pendiente": "COUNT(*) WHERE estado = 'pendiente'",
+                        "aceptado": "COUNT(*) WHERE estado IN ('aceptado', 'editado_aceptado')",
+                        "rechazado": "COUNT(*) WHERE estado = 'rechazado'",
+                    },
+                },
+            },
+        }
+        result["_metadata"] = metadata
+        return result
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -118,6 +161,52 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, Any]:
         "creditos": {
             "disponibles": creditos_disponibles,
             "total_comprados": creditos_total_comprados,
+        },
+    }
+    result["_metadata"] = {
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        "freshness": {
+            "status": "fresh",
+            "age_seconds": 0,
+            "ttl_seconds": _CACHE_TTL,
+            "cache": "miss",
+        },
+        "provenance": {
+            "usuarios": {
+                "metric_key": "usuarios",
+                "source": "postgresql.usuarios",
+                "scope": "all_users",
+                "definitions": {
+                    "total": "COUNT(*) en usuarios",
+                    "activos": "COUNT(*) WHERE activo = TRUE",
+                    "inactivos": "total - activos",
+                },
+            },
+            "informes": {
+                "metric_key": "informes",
+                "source": "postgresql.informes",
+                "scope": "all_reports",
+                "definitions": {
+                    "pendiente": "COUNT(*) WHERE estado = 'pendiente'",
+                    "aceptado": "COUNT(*) WHERE estado IN ('aceptado', 'editado_aceptado')",
+                    "rechazado": "COUNT(*) WHERE estado = 'rechazado'",
+                },
+            },
+            "audit_eventos": {
+                "metric_key": "audit_eventos",
+                "source": "postgresql.sesiones_audit",
+                "scope": "all_events",
+            },
+            "ingresos_total_clp": {
+                "metric_key": "ingresos_total_clp",
+                "source": "postgresql.informes",
+                "scope": "cobro_estado='pagado'",
+            },
+            "creditos": {
+                "metric_key": "creditos",
+                "source": "postgresql.licencias",
+                "scope": "licencias activas para disponibles",
+            },
         },
     }
     _dashboard_cache["data"] = result

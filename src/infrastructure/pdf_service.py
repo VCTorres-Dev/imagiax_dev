@@ -1348,6 +1348,7 @@ async def generate_informe_pdf(
 def build_pdf_streaming_response(
     informe: dict[str, Any],
     *,
+    mode: str = 'download',
     institution_name: str = '',
     institution_subtitle: str = '',
     institution_url: str = '',
@@ -1385,12 +1386,17 @@ def build_pdf_streaming_response(
 
     short_id = (informe.get('id') or 'unknown')[:8]
     filename = 'informe-' + short_id + '.pdf'
+    mode_normalized = (mode or 'download').strip().lower()
+    # Backward-compatible alias: `preview` behaves as `inline`.
+    if mode_normalized == 'preview':
+        mode_normalized = 'inline'
+    disposition = 'inline' if mode_normalized == 'inline' else 'attachment'
 
     return StreamingResponse(
         _async_stream(),
         media_type='application/pdf',
         headers={
-            'Content-Disposition': 'attachment; filename="' + filename + '"',
+            'Content-Disposition': disposition + '; filename="' + filename + '"',
             'Cache-Control': 'private, no-store, max-age=0, must-revalidate',
             'Pragma': 'no-cache',
             'Expires': '0',

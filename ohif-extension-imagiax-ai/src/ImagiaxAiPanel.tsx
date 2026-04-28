@@ -77,6 +77,7 @@ interface HistoryEntry {
   sections: ReportSection[];
   pdfUrl: string;
   qrDataUrl: string;
+  backendSynced?: boolean;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -190,6 +191,10 @@ function normalizeTitle(value: string): string {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toUpperCase();
+}
+
+function buildBackendPdfUrl(informeId: string, mode: 'inline' | 'download'): string {
+  return `${IMAGIAX_BACKEND}/informes/${encodeURIComponent(informeId)}/pdf?mode=${mode}`;
 }
 
 function getPatientFindings(sections: ReportSection[]): string[] {
@@ -1008,7 +1013,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       setPdfUrl(url);
       setHistory(prev => [{
         informeId, fecha: formatDate(new Date()), patient: { ...patient },
-        sections: [...sections], pdfUrl: url, qrDataUrl,
+        sections: [...sections], pdfUrl: url, qrDataUrl, backendSynced: saveSucceeded,
       }, ...prev]);
       setState('guardado');
     } catch (err) {
@@ -1030,7 +1035,47 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     setPdfUrl('');
   }, [editSections]);
 
+  const handlePreviewHistoryPdf = useCallback(async (entry: HistoryEntry) => {
+    // Use backend PDF route only for reports confirmed/synced in backend.
+    // Older local-only history entries must keep local jsPDF fallback.
+    const canUseBackend = Boolean(entry.informeId && entry.backendSynced === true);
+    if (canUseBackend) {
+      const backendPreviewWindow = window.open(
+        buildBackendPdfUrl(entry.informeId, 'inline'),
+        '_blank',
+        'noopener,noreferrer'
+      );
+      if (backendPreviewWindow) {
+        return;
+      }
+    }
+
+    try {
+      const fallbackUrl = await generateReportPDF(entry.patient, entry.sections, entry.informeId, entry.qrDataUrl);
+      const fallbackPreviewWindow = window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+      if (!fallbackPreviewWindow) {
+        URL.revokeObjectURL(fallbackUrl);
+      } else {
+        setTimeout(() => URL.revokeObjectURL(fallbackUrl), 10_000);
+      }
+    } catch (err) {
+      console.error('Error previsualizando PDF del historial:', err);
+    }
+  }, []);
+
   const handleDownloadHistoryPdf = useCallback(async (entry: HistoryEntry) => {
+    const canUseBackend = Boolean(entry.informeId && entry.backendSynced === true);
+    if (canUseBackend) {
+      const backendDownloadWindow = window.open(
+        buildBackendPdfUrl(entry.informeId, 'download'),
+        '_blank',
+        'noopener,noreferrer'
+      );
+      if (backendDownloadWindow) {
+        return;
+      }
+    }
+
     try {
       const url = await generateReportPDF(entry.patient, entry.sections, entry.informeId, entry.qrDataUrl);
       const a = document.createElement('a');
@@ -1537,12 +1582,20 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
           </div>
           <ScaledPreview sec={viewingEntry.sections} pid={viewingEntry.informeId} qr={viewingEntry.qrDataUrl} pat={viewingEntry.patient} />
           {viewingEntry.sections?.length > 0 && (
-            <button onClick={() => handleDownloadHistoryPdf(viewingEntry)}
-              style={{ background:'linear-gradient(135deg,#1e40af,#3b82f6)', color:'white', borderRadius:'6px',
-                padding:'11px', fontSize:'12px', fontWeight:'700', border:'none',
-                display:'flex', alignItems:'center', justifyContent:'center', gap:'6px', cursor:'pointer' }}>
-              Descargar PDF
-            </button>
+            <div style={{ display:'flex', gap:'8px' }}>
+              <button onClick={() => handlePreviewHistoryPdf(viewingEntry)}
+                style={{ flex:1, background:'#0f172a', color:'#93c5fd', borderRadius:'6px',
+                  padding:'11px', fontSize:'12px', fontWeight:'700', border:'1px solid #1e3a5f',
+                  display:'flex', alignItems:'center', justifyContent:'center', gap:'6px', cursor:'pointer' }}>
+                Ver PDF
+              </button>
+              <button onClick={() => handleDownloadHistoryPdf(viewingEntry)}
+                style={{ flex:1, background:'linear-gradient(135deg,#1e40af,#3b82f6)', color:'white', borderRadius:'6px',
+                  padding:'11px', fontSize:'12px', fontWeight:'700', border:'none',
+                  display:'flex', alignItems:'center', justifyContent:'center', gap:'6px', cursor:'pointer' }}>
+                Descargar PDF
+              </button>
+            </div>
           )}
         </>
       ) : history.length === 0 ? (

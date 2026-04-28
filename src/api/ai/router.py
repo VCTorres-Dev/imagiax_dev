@@ -2527,6 +2527,7 @@ async def listado_informes(
 @router.get("/informes/{informe_id}/pdf")
 async def descargar_informe_pdf(
     informe_id: str = Path(..., pattern=r"^[0-9a-f-]{36}$"),
+    mode: str = Query(default="download", pattern=r"^(inline|download|preview)$"),
     pool: asyncpg.Pool = Depends(get_db_pool),
     current_user: UserPayload = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -2540,7 +2541,7 @@ async def descargar_informe_pdf(
     if not (informe.get("informe_generado") or informe.get("informe_final")):
         raise HTTPException(status_code=404, detail="El informe no tiene contenido generado.")
     try:
-        return build_pdf_streaming_response(informe)
+        return build_pdf_streaming_response(informe, mode=mode)
     except RuntimeError as exc:
         logger.exception("Error generando PDF informe_id=%s", informe_id)
         raise HTTPException(status_code=500, detail="Error interno al generar el PDF.") from exc

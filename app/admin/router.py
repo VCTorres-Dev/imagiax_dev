@@ -282,6 +282,7 @@ async def admin_informe_detail(
 async def admin_informe_pdf(
     informe_id: str,
     request: Request,
+    mode: str = Query(default="download", pattern=r"^(inline|download|preview)$"),
     _: UserPayload = Depends(require_role("admin")),
 ):
     """Genera y descarga el informe medico como PDF."""
@@ -294,7 +295,7 @@ async def admin_informe_pdf(
     if not informe_generado and not informe_final:
         raise HTTPException(status_code=404, detail="El informe no tiene contenido generado.")
     try:
-        return build_pdf_streaming_response(informe)
+        return build_pdf_streaming_response(informe, mode=mode)
     except RuntimeError as exc:
         logger.error("Error generando PDF de informe: %s", exc)
         raise HTTPException(status_code=500, detail="Error interno al generar el PDF") from exc

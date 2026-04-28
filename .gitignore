@@ -49,6 +49,7 @@ Reporte_Tecnico_*.pdf
 
 # Claude AI — archivos internos de sesión
 .claude/
+.atl/
 
 # Versiones antiguas del servidor (historial queda en git, no en archivos)
 servidor_api.py
