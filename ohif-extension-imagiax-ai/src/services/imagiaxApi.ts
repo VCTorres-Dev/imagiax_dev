@@ -18,9 +18,9 @@ const API_V2_URL =
 // Timeouts por tipo de operación (en milisegundos)
 const TIMEOUTS = {
   DEFAULT: 30_000,        // 30 segundos para operaciones normales
-  GENERAR_INFORME: 120_000, // 2 minutos para generación de informe (IA + Gemini)
+  GENERAR_INFORME: 600_000, // 10 minutos para inicio/confirmación del análisis
   COMPARAR_V1V2: 180_000,   // 3 minutos para comparación V1 vs V2
-  PDF_FETCH: 45_000,        // 45 segundos para descarga/preview de PDF backend
+  JOB_STATUS: 30_000,       // 30 segundos por poll individual del job
 } as const;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ export interface AIResultados {
   study_instance_uid: string;
   total_encontradas: number;
   total_analizadas: number;
-  hallazgos_estudio: HallazgoEstudio[];
+  hallazgos_estudio: HallazgoEstudio[] | null;
   sin_hallazgos_estudio: boolean;
   nivel_alerta: 'NORMAL' | 'BAJA' | 'MEDIA' | 'ALTA';
   todas_patologias: Record<string, PatologiaInfo>;
@@ -57,14 +57,23 @@ export interface GenerarInformeResponse {
   creditos_restantes: number | null;
   pago_automatico: PagoAutomaticoInfo | null;
   advertencia: string;
+  // v1.1 pipeline fields
+  pipeline_version?: string;
+  pipeline_id?: string | null;
+  /** Quality gate verdict: adequate | suboptimal | not_analyzable */
+  calidad_imagen?: 'adequate' | 'suboptimal' | 'not_analyzable' | null;
+  /** Audit state: sin_hallazgos | observaciones | alerta | sin_auditoria */
+  auditoria_estado?: 'sin_hallazgos' | 'observaciones' | 'alerta' | 'sin_auditoria' | null;
+  /** Manual review required — set when auditor blocks twice */
+  requiere_revision_manual?: boolean;
 }
 
-export interface GenerarInformeProcessingResponse {
+export interface GenerarInformeAcceptedResponse {
   job_id: string;
   status: 'processing';
 }
 
-type GenerarInformeApiResponse = GenerarInformeResponse | GenerarInformeProcessingResponse;
+export type GenerarInformeResult = GenerarInformeResponse | GenerarInformeAcceptedResponse;
 
 export interface PagoAutomaticoInfo {
   estado: 'approved' | 'rejected' | string;
@@ -121,6 +130,27 @@ export interface InformeDB {
   notas_rechazo: string | null;
   timestamp_creacion: string;
   timestamp_decision: string | null;
+  // Fields from /informes/listado endpoint (created_at may be returned instead of timestamp_creacion)
+  created_at?: string;
+  usuario_id?: string;
+  usuario_email?: string;
+  cobro_estado?: string;
+  cobro_metodo?: string;
+  cobro_monto_clp?: number;
+  cobro_ref_id?: string;
+  patient_age?: string | null;
+  nota_clinica?: string | null;
+  short_id?: string | null;
+}
+
+export interface ListadoInformesResponse {
+  total: number;
+  filtro_estado: string | null;
+  items: InformeDB[];
+  limit: number;
+  offset: number | null;
+  has_more: boolean;
+  next_cursor: string | null;
 }
 
 export interface SaludResponse {
@@ -162,6 +192,36 @@ export class ImagiaxTimeoutError extends Error {
   }
 }
 
+export function isGenerarInformeAcceptedResponse(
+  response: GenerarInformeResult
+): response is GenerarInformeAcceptedResponse {
+  return 'job_id' in response && response.status === 'processing';
+}
+
+// ── Auth state ─────────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  user_id: string;
+  email: string;
+  nombre: string;
+  rol: string;
+}
+
+export async function getCurrentUser(): Promise<AuthUser> {
+  const res = await fetch(`${API_BASE_URL}/auth/me`, {
+    credentials: 'include',
+  });
+  if (!res.ok) throw new ImagiaxApiError(res.status, 'No autenticado');
+  const data = await res.json();
+  return data.user as AuthUser;
+}
+
+export async function logoutApi(): Promise<void> {
+  await fetch(`${API_BASE_URL}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+}
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /**
@@ -170,29 +230,25 @@ export class ImagiaxTimeoutError extends Error {
  * @param options - Opciones de fetch + timeout personalizado
  * @param timeoutMs - Timeout en milisegundos (default: TIMEOUTS.DEFAULT)
  */
+/**
+ * Realiza una petición HTTP con timeout usando AbortController.
+ * Soporta respuestas 202 Accepted con {job_id, status: 'processing'} —
+ * en ese caso retorna el objeto 202 directamente para que el caller haga polling.
+ */
 async function apiRequest<T>(
   path: string,
   options: RequestInit = {},
   timeoutMs: number = TIMEOUTS.DEFAULT
 ): Promise<T> {
-  const { data } = await apiRequestWithStatus<T>(path, options, timeoutMs);
-  return data;
-}
-
-async function apiRequestWithStatus<T>(
-  path: string,
-  options: RequestInit = {},
-  timeoutMs: number = TIMEOUTS.DEFAULT
-): Promise<{ status: number; data: T }> {
   const url = `${API_BASE_URL}${path}`;
-  
-  // Crear AbortController para timeout
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {
       ...options,
+      credentials: 'include',
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
@@ -200,10 +256,19 @@ async function apiRequestWithStatus<T>(
       },
     });
 
+    if (response.status === 401) {
+      throw new ImagiaxApiError(401, 'Sesión expirada. Por favor, inicia sesión nuevamente.');
+    }
+
+    // 202 Accepted: async job — return raw body for caller to handle polling
+    if (response.status === 202) {
+      return response.json() as Promise<T>;
+    }
+
     if (!response.ok) {
       let detail = response.statusText;
       try {
-        const errorBody = await response.json();
+        const errorBody = await response.json() as { detail?: string; message?: string };
         detail = errorBody.detail || errorBody.message || detail;
       } catch {
         // Non-JSON error body — use statusText
@@ -211,10 +276,8 @@ async function apiRequestWithStatus<T>(
       throw new ImagiaxApiError(response.status, detail);
     }
 
-    const data = (await response.json()) as T;
-    return { status: response.status, data };
+    return response.json() as Promise<T>;
   } catch (error) {
-    // Detectar si el error es por abort (timeout)
     if (error instanceof Error && error.name === 'AbortError') {
       throw new ImagiaxTimeoutError(timeoutMs, path);
     }
@@ -223,7 +286,6 @@ async function apiRequestWithStatus<T>(
     clearTimeout(timeoutId);
   }
 }
-
 
 // ── API Functions ──────────────────────────────────────────────────────────────
 
@@ -236,63 +298,49 @@ export async function checkSalud(): Promise<SaludResponse> {
 
 /**
  * Full pipeline: DICOM → AI inference → Gemini report → PostgreSQL persistence.
- * Returns the generated report text, AI results, and the informe_id for tracking.
- * 
- * ⚠ Este endpoint puede tomar 30-90 segundos. Timeout: 2 minutos.
+ * Returns either the generated report or a 202 async job token for client polling.
+ *
+ * ⚠ Este endpoint puede tomar varios minutos. Timeout inicial: 10 minutos.
+ *
+ * @param studyInstanceUID - DICOM Study Instance UID
+ * @param maxInstances     - Max DICOM instances to analyze (default 50)
+ * @param notaClinica      - Optional clinical note from physician (max 500 chars, v1.1)
+ * @param solicitarAuditoria - Request manual audit pass (v1.1)
+ * @param versionPipeline  - Pipeline version override: "1.0" | "1.1" (omit to use server default)
  */
 export async function generarInforme(
   studyInstanceUID: string,
-  maxInstances: number = 5
-): Promise<GenerarInformeResponse> {
-  const MAX_POLL_MS = 4 * 60_000;
-  const POLL_INTERVAL_MS = 2_000;
-  const pollStartedAt = Date.now();
-
-  const initial = await apiRequestWithStatus<GenerarInformeApiResponse>(
+  maxInstances: number = 50,
+  notaClinica?: string,
+  solicitarAuditoria: boolean = false,  // IRONCLAD: Forzado a false para eliminar UI de auditoría
+  versionPipeline?: string
+): Promise<GenerarInformeResult> {
+  return apiRequest<GenerarInformeResult>(
     '/generar/informe',
     {
       method: 'POST',
       body: JSON.stringify({
         study_instance_uid: studyInstanceUID,
         max_instances: maxInstances,
+        ...(notaClinica !== undefined && notaClinica !== null && notaClinica.trim() !== ''
+          ? { nota_clinica: notaClinica.trim().slice(0, 500) }
+          : {}),
+        solicitar_auditoria: solicitarAuditoria,
+        ...(versionPipeline ? { version_pipeline: versionPipeline } : {}),
       }),
     },
     TIMEOUTS.GENERAR_INFORME
   );
+}
 
-  if (initial.status === 202 || isProcessingResponse(initial.data)) {
-    const jobId = isProcessingResponse(initial.data) ? initial.data.job_id : undefined;
-    if (!jobId) {
-      throw new ImagiaxApiError(502, 'Respuesta inválida del servidor: falta job_id para continuar el procesamiento del informe.');
-    }
-
-    while (Date.now() - pollStartedAt < MAX_POLL_MS) {
-      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
-      const statusResponse = await apiRequestWithStatus<GenerarInformeApiResponse>(
-        `/generar/informe/estado/${encodeURIComponent(jobId)}`,
-        { method: 'GET' },
-        TIMEOUTS.DEFAULT
-      );
-
-      if (statusResponse.status === 202 || isProcessingResponse(statusResponse.data)) {
-        continue;
-      }
-
-      if (isValidGenerarInformeResponse(statusResponse.data)) {
-        return statusResponse.data;
-      }
-
-      throw new ImagiaxApiError(502, 'El análisis terminó, pero el servidor devolvió un informe incompleto (faltan informe_id o informe_texto).');
-    }
-
-    throw new ImagiaxTimeoutError(MAX_POLL_MS, `/generar/informe/estado/${encodeURIComponent(jobId)}`);
-  }
-
-  if (isValidGenerarInformeResponse(initial.data)) {
-    return initial.data;
-  }
-
-  throw new ImagiaxApiError(502, 'Respuesta inválida del servidor: no se pudo obtener un informe final válido.');
+export async function getEstadoGeneracionInforme(
+  jobId: string
+): Promise<GenerarInformeResult> {
+  return apiRequest<GenerarInformeResult>(
+    `/generar/informe/estado/${encodeURIComponent(jobId)}`,
+    {},
+    TIMEOUTS.JOB_STATUS
+  );
 }
 
 /**
@@ -330,13 +378,65 @@ export async function getInformesPorEstudio(
 }
 
 /**
+/**
  * List all reports, optionally filtered by estado.
+ * @param estado - optional status filter
+ * @param limit  - max results to return (default 50 to avoid fetching thousands of records)
  */
 export async function listadoInformes(
-  estado?: string
-): Promise<{ total: number; filtro_estado: string | null; informes: InformeDB[] }> {
-  const query = estado ? `?estado=${encodeURIComponent(estado)}` : '';
+  estado?: string,
+  limit = 25,
+  cursorId?: string
+): Promise<ListadoInformesResponse> {
+  const params = new URLSearchParams();
+  if (estado) params.set('estado', estado);
+  params.set('limit', String(limit));
+  if (cursorId) params.set('cursor_id', cursorId);
+  const query = params.toString() ? `?${params.toString()}` : '';
   return apiRequest(`/informes/listado${query}`);
+}
+
+/**
+ * Download a medical report PDF from the backend.
+ * Returns a Blob that can be converted to a download URL via URL.createObjectURL().
+ *
+ * @param informeId - UUID of the report
+ */
+export async function downloadInformePdf(informeId: string): Promise<Blob> {
+  const url = `${API_BASE_URL}/informes/${encodeURIComponent(informeId)}/pdf`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.DEFAULT);
+
+  try {
+    const response = await fetch(url, {
+      credentials: 'include',
+      signal: controller.signal,
+      headers: { 'Accept': 'application/pdf' },
+    });
+
+    if (response.status === 401) {
+      throw new ImagiaxApiError(401, 'Sesión expirada. Por favor, inicia sesión nuevamente.');
+    }
+
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const errorBody = await response.json() as { detail?: string; message?: string };
+        detail = errorBody.detail || errorBody.message || detail;
+      } catch { /* Non-JSON error body */ }
+      throw new ImagiaxApiError(response.status, detail);
+    }
+
+    return response.blob();
+  } catch (error) {
+    if (error instanceof ImagiaxApiError) throw error;
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ImagiaxTimeoutError(TIMEOUTS.DEFAULT, url);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ══ V2 Experimental — NV-Reason-CXR-3B ═══════════════════════════════════════
@@ -401,6 +501,7 @@ async function apiV2Request<T>(
   try {
     const response = await fetch(url, {
       ...options,
+      credentials: 'include',
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
@@ -476,77 +577,4 @@ export async function getMetodoPago(): Promise<MetodoPagoResponse> {
  */
 export async function borrarMetodoPago(): Promise<{ ok: boolean; mensaje: string }> {
   return apiRequest('/pagos/metodo-pago', { method: 'DELETE' });
-}
-
-/**
- * Descarga el PDF autoritativo del backend como Blob binario.
- *
- * Single source of truth: para informes sincronizados, el frontend debe
- * previsualizar/descargar siempre este artefacto backend.
- */
-export async function fetchInformePdfBlob(
-  informeId: string,
-  mode: 'inline' | 'download' | 'preview' = 'inline'
-): Promise<Blob> {
-  const path = `/informes/${encodeURIComponent(informeId)}/pdf?mode=${mode}`;
-  const url = `${API_BASE_URL}${path}`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.PDF_FETCH);
-
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      let detail = response.statusText || 'Error descargando PDF';
-      try {
-        const contentType = response.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          const errorBody = await response.json() as { detail?: string; message?: string };
-          detail = errorBody.detail || errorBody.message || detail;
-        } else {
-          const text = await response.text();
-          if (text?.trim()) detail = text.trim();
-        }
-      } catch {
-        // Keep default detail
-      }
-      throw new ImagiaxApiError(response.status, detail);
-    }
-
-    const contentType = (response.headers.get('content-type') || '').toLowerCase();
-    if (!contentType.includes('application/pdf')) {
-      throw new ImagiaxApiError(
-        500,
-        `Respuesta inválida del servidor. Se esperaba application/pdf y se recibió: ${contentType || 'sin content-type'}`
-      );
-    }
-
-    return await response.blob();
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new ImagiaxTimeoutError(TIMEOUTS.PDF_FETCH, path);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-function isProcessingResponse(payload: unknown): payload is GenerarInformeProcessingResponse {
-  if (!payload || typeof payload !== 'object') return false;
-  const candidate = payload as Record<string, unknown>;
-  return candidate.status === 'processing' && typeof candidate.job_id === 'string' && candidate.job_id.trim().length > 0;
-}
-
-function isValidGenerarInformeResponse(payload: unknown): payload is GenerarInformeResponse {
-  if (!payload || typeof payload !== 'object') return false;
-  const candidate = payload as Record<string, unknown>;
-  return (
-    typeof candidate.informe_id === 'string' && candidate.informe_id.trim().length > 0 &&
-    typeof candidate.informe_texto === 'string' && candidate.informe_texto.trim().length > 0
-  );
 }
