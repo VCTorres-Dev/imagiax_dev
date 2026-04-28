@@ -71,8 +71,10 @@ echo "REMOTE_OK"
 $remoteScript = $remoteScript.Replace("__BASE_URL__", $baseUrlQ)
 $remoteScript = $remoteScript.Replace("__CANARY_CONTAINER__", $canaryContainerQ)
 
-$sshArgs = @("-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=no", "-i", $SshKey, $HostName, "bash -s")
-$remoteOutput = $remoteScript | & ssh @sshArgs 2>&1
+$remoteScript = $remoteScript -replace "`r`n", "`n"
+$remoteScriptBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteScript))
+$sshArgs = @("-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=no", "-i", $SshKey, $HostName, "printf '%s' '$remoteScriptBase64' | base64 -d | bash")
+$remoteOutput = & ssh @sshArgs 2>&1
 if ($LASTEXITCODE -ne 0) { Fail "Smoke OHIF canary falló: $remoteOutput" }
 
 $rootLine = $remoteOutput | Where-Object { $_ -like "ROOT_CODE=*" } | Select-Object -First 1

@@ -97,7 +97,7 @@ echo "OHIF_IMAGE_ID=$image_id"
 image_name=$(docker inspect --format '{{.Config.Image}}' "$PROD_CONTAINER" 2>/dev/null || true)
 echo "OHIF_IMAGE_NAME=$image_name"
 if [ "$image_name" != "$PROD_IMAGE" ]; then
-  echo "WARN: imagen OHIF activa '$image_name' difiere de esperada '$PROD_IMAGE'" >&2
+  echo "WARN: imagen OHIF activa '$image_name' difiere de esperada '$PROD_IMAGE'"
 fi
 
 docker image inspect "$PROD_IMAGE" >/dev/null 2>&1 || {
@@ -128,8 +128,10 @@ $remoteScript = $remoteScript.Replace("__PROD_IMAGE__", $prodImageQ)
 $remoteScript = $remoteScript.Replace("__VIEWERS_PATH__", $remoteViewersPathQ)
 $remoteScript = $remoteScript.Replace("__CANARY_PORT__", $canaryPortQ)
 
-$sshArgs = @("-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=no", "-i", $SshKey, $HostName, "bash -s")
-$remoteOutput = $remoteScript | & ssh @sshArgs 2>&1
+$remoteScript = $remoteScript -replace "`r`n", "`n"
+$remoteScriptBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteScript))
+$sshArgs = @("-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=no", "-i", $SshKey, $HostName, "printf '%s' '$remoteScriptBase64' | base64 -d | bash")
+$remoteOutput = & ssh @sshArgs 2>&1
 if ($LASTEXITCODE -ne 0) { Fail "Chequeo remoto OHIF falló: $remoteOutput" }
 
 $remoteOutput | ForEach-Object { Write-Host $_ }
