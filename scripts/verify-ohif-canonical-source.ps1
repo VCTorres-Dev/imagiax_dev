@@ -1,5 +1,5 @@
 param(
-  [string]$ExpectedPanelSha256 = 'a438d53e1db005099c02653b3301493b8efdb7c2ee50071f39ab4e2ef8664815',
+  [string]$ExpectedPanelSha256 = '0014d3df6d472ce2c245be13a1d6d2defe7550fa249e23b74d2db950c5af6d26',
   [string]$ExpectedApiSha256 = 'dc56901738f0b8477f17cbc290c1adda5e3c37a8aa1c54a6ad185c6974b8a9d0'
 )
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import QRCode from 'qrcode';
 import { useActiveViewportDisplaySets, utils } from '@ohif/core';
-import logoAndesSaludPng from './logo-andes-salud.png';
+import { LOGO_IMAGIAX_SVG } from './logoBase64';
 import {
   generarInforme,
   getEstadoGeneracionInforme,
@@ -38,7 +38,6 @@ let DOCTOR_LICENSE   = _cfg.doctor_license    || 'CRM 12345';
 let BRAND_NAME       = _cfg.brand_name        || 'Centro Médico Andes Salud';
 let BRAND_SUBTITLE   = _cfg.brand_subtitle    || 'Diagnóstico por Imágenes · Talca';
 const IMAGIAX_BACKEND  = _cfg.backend_url       || 'http://localhost:8010';
-const LOGO_IMAGIAX_SVG = logoAndesSaludPng;
 const MAX_HISTORY_ENTRIES = 100;
 const ACTIVE_ANALYSIS_JOB_KEY = 'imagiax_active_analysis_job_v1';
 const ANALYSIS_MAX_POLL_MS = 10 * 60 * 1000;
