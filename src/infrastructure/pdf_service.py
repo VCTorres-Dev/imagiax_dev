@@ -1401,5 +1401,7 @@ def build_pdf_streaming_response(
             'Pragma': 'no-cache',
             'Expires': '0',
             'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "frame-ancestors 'self'",
+            'X-Frame-Options': 'SAMEORIGIN',
         },
     )

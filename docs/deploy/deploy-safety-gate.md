@@ -84,6 +84,18 @@ Importante: con el estado observado hoy, una rama cuyo `Dockerfile` apunte a `se
 
 7. Conservar image id anterior para rollback inmediato.
 
+## Gate específico OHIF
+
+OHIF es una superficie distinta del backend FastAPI. Un deploy backend **no** actualiza el bundle OHIF servido por `ohif-imagiax`.
+
+Para cambios en `ohif-extension-imagiax-ai/**`:
+
+1. No desplegar como parte de un backend-only cutover esperando cambios de UI.
+2. Reconciliar la extensión canónica del commit candidato dentro del monorepo `Viewers` antes de construir.
+3. Construir una imagen OHIF etiquetada por commit; no usar `latest` como candidato.
+4. Ejecutar el canary y aceptación manual de `docs/deploy/ohif-canary-runbook.md`.
+5. Mantener rollback tag de la imagen OHIF activa antes de reemplazar `ohif-imagiax`.
+
 ## Smoke checks mínimos
 
 Antes de considerar sano un deploy:

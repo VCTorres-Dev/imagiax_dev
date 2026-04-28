@@ -20,6 +20,7 @@ const TIMEOUTS = {
   DEFAULT: 30_000,        // 30 segundos para operaciones normales
   GENERAR_INFORME: 120_000, // 2 minutos para generación de informe (IA + Gemini)
   COMPARAR_V1V2: 180_000,   // 3 minutos para comparación V1 vs V2
+  PDF_FETCH: 45_000,        // 45 segundos para descarga/preview de PDF backend
 } as const;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -419,4 +420,62 @@ export async function getMetodoPago(): Promise<MetodoPagoResponse> {
  */
 export async function borrarMetodoPago(): Promise<{ ok: boolean; mensaje: string }> {
   return apiRequest('/pagos/metodo-pago', { method: 'DELETE' });
+}
+
+/**
+ * Descarga el PDF autoritativo del backend como Blob binario.
+ *
+ * Single source of truth: para informes sincronizados, el frontend debe
+ * previsualizar/descargar siempre este artefacto backend.
+ */
+export async function fetchInformePdfBlob(
+  informeId: string,
+  mode: 'inline' | 'download' | 'preview' = 'inline'
+): Promise<Blob> {
+  const path = `/informes/${encodeURIComponent(informeId)}/pdf?mode=${mode}`;
+  const url = `${API_BASE_URL}${path}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.PDF_FETCH);
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      let detail = response.statusText || 'Error descargando PDF';
+      try {
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const errorBody = await response.json() as { detail?: string; message?: string };
+          detail = errorBody.detail || errorBody.message || detail;
+        } else {
+          const text = await response.text();
+          if (text?.trim()) detail = text.trim();
+        }
+      } catch {
+        // Keep default detail
+      }
+      throw new ImagiaxApiError(response.status, detail);
+    }
+
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/pdf')) {
+      throw new ImagiaxApiError(
+        500,
+        `Respuesta inválida del servidor. Se esperaba application/pdf y se recibió: ${contentType || 'sin content-type'}`
+      );
+    }
+
+    return await response.blob();
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ImagiaxTimeoutError(TIMEOUTS.PDF_FETCH, path);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }

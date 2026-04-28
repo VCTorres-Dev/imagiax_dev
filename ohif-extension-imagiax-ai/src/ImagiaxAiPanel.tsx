@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useCallback, memo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
 import jsPDF from 'jspdf';
 import QRCode from 'qrcode';
 import { useActiveViewportDisplaySets, utils } from '@ohif/core';
-import logoAndesSaludPng from './logo-andes-salud.png';
+import { LOGO_IMAGIAX_SVG, getLogoPng as getLogoPngFromSvg } from './logoBase64';
 import {
   generarInforme,
   guardarDecision,
@@ -12,6 +12,7 @@ import {
   compararV1V2,
   getMetodoPago,
   borrarMetodoPago,
+  fetchInformePdfBlob,
   type AIResultados,
   type V2CompararResponse,
   type EstadoCreditosResponse,
@@ -29,7 +30,6 @@ let DOCTOR_LICENSE   = _cfg.doctor_license    || 'CRM 12345';
 let BRAND_NAME       = _cfg.brand_name        || 'Centro Médico Andes Salud';
 let BRAND_SUBTITLE   = _cfg.brand_subtitle    || 'Diagnóstico por Imágenes · Talca';
 const IMAGIAX_BACKEND  = _cfg.backend_url       || 'http://localhost:8010';
-const LOGO_IMAGIAX_SVG = logoAndesSaludPng;
 const MAX_HISTORY_ENTRIES = 50;
 
 // Cargar config dinámica del backend (doctor/clínica configurables)
@@ -51,7 +51,7 @@ async function loadBackendConfig(): Promise<void> {
 }
 
 async function getLogoPng(_size = 180): Promise<string> {
-  return logoAndesSaludPng;
+  return getLogoPngFromSvg(_size);
 }
 
 // ── Tipos ──────────────────────────────────────────────────────────────────────
@@ -79,6 +79,8 @@ interface HistoryEntry {
   qrDataUrl: string;
   backendSynced?: boolean;
 }
+
+type HistoryPdfLoadState = 'idle' | 'loading' | 'ready' | 'error';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function formatDate(d: Date): string {
@@ -191,10 +193,6 @@ function normalizeTitle(value: string): string {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toUpperCase();
-}
-
-function buildBackendPdfUrl(informeId: string, mode: 'inline' | 'download'): string {
-  return `${IMAGIAX_BACKEND}/informes/${encodeURIComponent(informeId)}/pdf?mode=${mode}`;
 }
 
 function getPatientFindings(sections: ReportSection[]): string[] {
@@ -773,6 +771,38 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     return [];
   });
   const [viewingEntry, setViewingEntry] = useState<HistoryEntry | null>(null);
+  const [historyPdfState, setHistoryPdfState] = useState<HistoryPdfLoadState>('idle');
+  const [historyPdfUrl, setHistoryPdfUrl] = useState<string>('');
+  const [historyPdfError, setHistoryPdfError] = useState<string>('');
+  const [historyPdfReloadKey, setHistoryPdfReloadKey] = useState(0);
+  const historyPdfBlobRef = useRef<Blob | null>(null);
+  const historyPdfObjectUrlRef = useRef<string | null>(null);
+  const historyPdfInformeIdRef = useRef<string | null>(null);
+
+  const revokeHistoryPdfObjectUrl = useCallback(() => {
+    if (historyPdfObjectUrlRef.current) {
+      URL.revokeObjectURL(historyPdfObjectUrlRef.current);
+      historyPdfObjectUrlRef.current = null;
+    }
+    historyPdfBlobRef.current = null;
+    historyPdfInformeIdRef.current = null;
+  }, []);
+
+  const cleanupHistoryPdfObjectUrl = useCallback(() => {
+    revokeHistoryPdfObjectUrl();
+    setHistoryPdfUrl('');
+  }, [revokeHistoryPdfObjectUrl]);
+
+  const assignHistoryPdfBlob = useCallback((informeId: string, blob: Blob) => {
+    cleanupHistoryPdfObjectUrl();
+    const objectUrl = URL.createObjectURL(blob);
+    historyPdfObjectUrlRef.current = objectUrl;
+    historyPdfBlobRef.current = blob;
+    historyPdfInformeIdRef.current = informeId;
+    setHistoryPdfUrl(objectUrl);
+    setHistoryPdfState('ready');
+    setHistoryPdfError('');
+  }, [cleanupHistoryPdfObjectUrl]);
 
   useEffect(() => {
     try {
@@ -782,6 +812,14 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       localStorage.setItem('imagiax_history_v1', JSON.stringify(toStore));
     } catch { /* cuota excedida u otro error */ }
   }, [history]);
+
+  useEffect(() => {
+    return () => {
+      if (historyPdfObjectUrlRef.current) {
+        URL.revokeObjectURL(historyPdfObjectUrlRef.current);
+      }
+    };
+  }, []);
 
   // ── Extract patient info from OHIF active display set ───────────────────
   const [patient, setPatient] = useState<PatientInfo>({
@@ -1035,19 +1073,75 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     setPdfUrl('');
   }, [editSections]);
 
+  const getHistoryPdfErrorMessage = useCallback((error: unknown): string => {
+    if (error instanceof ImagiaxTimeoutError) {
+      return 'El PDF está demorando más de lo esperado. Probá descargarlo directamente.';
+    }
+    if (error instanceof ImagiaxApiError) {
+      if (error.status === 401 || error.status === 403) {
+        return 'No hay permisos para ver este PDF. Reingresá sesión e intentá nuevamente.';
+      }
+      return `No se pudo obtener el PDF (${error.status}): ${error.detail}`;
+    }
+    return `Error cargando PDF: ${(error as Error)?.message || 'desconocido'}`;
+  }, []);
+
+  const triggerBrowserDownload = useCallback((url: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
+  useEffect(() => {
+    if (!viewingEntry || viewingEntry.backendSynced !== true) {
+      cleanupHistoryPdfObjectUrl();
+      setHistoryPdfState('idle');
+      setHistoryPdfError('');
+      return;
+    }
+
+    let cancelled = false;
+    cleanupHistoryPdfObjectUrl();
+    setHistoryPdfState('loading');
+    setHistoryPdfError('');
+
+    fetchInformePdfBlob(viewingEntry.informeId, 'inline')
+      .then(blob => {
+        if (cancelled) return;
+        assignHistoryPdfBlob(viewingEntry.informeId, blob);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        cleanupHistoryPdfObjectUrl();
+        setHistoryPdfState('error');
+        setHistoryPdfError(getHistoryPdfErrorMessage(err));
+      });
+
+    return () => {
+      cancelled = true;
+      revokeHistoryPdfObjectUrl();
+    };
+  }, [viewingEntry?.informeId, viewingEntry?.backendSynced, historyPdfReloadKey, assignHistoryPdfBlob, cleanupHistoryPdfObjectUrl, revokeHistoryPdfObjectUrl, getHistoryPdfErrorMessage]);
+
   const handlePreviewHistoryPdf = useCallback(async (entry: HistoryEntry) => {
-    // Use backend PDF route only for reports confirmed/synced in backend.
-    // Older local-only history entries must keep local jsPDF fallback.
-    const canUseBackend = Boolean(entry.informeId && entry.backendSynced === true);
-    if (canUseBackend) {
-      const backendPreviewWindow = window.open(
-        buildBackendPdfUrl(entry.informeId, 'inline'),
-        '_blank',
-        'noopener,noreferrer'
-      );
-      if (backendPreviewWindow) {
+    if (entry.backendSynced === true) {
+      if (historyPdfInformeIdRef.current === entry.informeId && historyPdfUrl) {
+        const backendPreviewWindow = window.open(historyPdfUrl, '_blank', 'noopener,noreferrer');
+        if (!backendPreviewWindow) {
+          setHistoryPdfError('El navegador bloqueó la ventana emergente. Usá “Descargar PDF”.');
+        }
         return;
       }
+      setHistoryPdfError('Cargando PDF del servidor...');
+      if (viewingEntry?.informeId === entry.informeId) {
+        setHistoryPdfReloadKey(value => value + 1);
+      } else {
+        setViewingEntry(entry);
+      }
+      return;
     }
 
     try {
@@ -1061,34 +1155,38 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     } catch (err) {
       console.error('Error previsualizando PDF del historial:', err);
     }
-  }, []);
+  }, [historyPdfUrl, viewingEntry?.informeId]);
 
   const handleDownloadHistoryPdf = useCallback(async (entry: HistoryEntry) => {
-    const canUseBackend = Boolean(entry.informeId && entry.backendSynced === true);
-    if (canUseBackend) {
-      const backendDownloadWindow = window.open(
-        buildBackendPdfUrl(entry.informeId, 'download'),
-        '_blank',
-        'noopener,noreferrer'
-      );
-      if (backendDownloadWindow) {
-        return;
+    if (entry.backendSynced === true) {
+      try {
+        if (historyPdfInformeIdRef.current === entry.informeId && historyPdfUrl) {
+          triggerBrowserDownload(historyPdfUrl, `${entry.informeId}.pdf`);
+          return;
+        }
+
+        setHistoryPdfState('loading');
+        setHistoryPdfError('');
+        const blob = await fetchInformePdfBlob(entry.informeId, 'download');
+        assignHistoryPdfBlob(entry.informeId, blob);
+        if (historyPdfObjectUrlRef.current) {
+          triggerBrowserDownload(historyPdfObjectUrlRef.current, `${entry.informeId}.pdf`);
+        }
+      } catch (err) {
+        setHistoryPdfState('error');
+        setHistoryPdfError(getHistoryPdfErrorMessage(err));
       }
+      return;
     }
 
     try {
       const url = await generateReportPDF(entry.patient, entry.sections, entry.informeId, entry.qrDataUrl);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${entry.informeId}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      triggerBrowserDownload(url, `${entry.informeId}.pdf`);
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Error regenerando PDF del historial:', err);
     }
-  }, []);
+  }, [assignHistoryPdfBlob, getHistoryPdfErrorMessage, historyPdfUrl, triggerBrowserDownload]);
 
   // ── V2 Experimental comparison trigger ─────────────────────────────────
   const handleCompararV2 = useCallback(async () => {
@@ -1149,7 +1247,11 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     setV2Result(null);
     setV2Error('');
     setV2Loading(false);
-  }, []);
+    setViewingEntry(null);
+    setHistoryPdfState('idle');
+    setHistoryPdfError('');
+    cleanupHistoryPdfObjectUrl();
+  }, [cleanupHistoryPdfObjectUrl]);
 
   // ── Renders ────────────────────────────────────────────────────────────────
   const tieneTarjeta = metodoPago?.tiene_tarjeta || creditos?.tiene_tarjeta || false;
@@ -1572,7 +1674,11 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     <div style={{ padding:'12px', display:'flex', flexDirection:'column', gap:'10px' }}>
       {viewingEntry ? (
         <>
-          <button onClick={() => setViewingEntry(null)}
+          <button onClick={() => {
+            setViewingEntry(null);
+            setHistoryPdfState('idle');
+            setHistoryPdfError('');
+          }}
             style={{ background:'transparent', color:'#3b82f6', border:'none', padding:'4px 0', fontSize:'11px', cursor:'pointer', textAlign:'left', display:'flex', alignItems:'center', gap:'4px' }}>
             Volver al historial
           </button>
@@ -1580,8 +1686,35 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
             <div style={{ color:'#f1f5f9', fontSize:'12px', fontWeight:'600' }}>{viewingEntry.patient.nombre}</div>
             <div style={{ color:'#64748b', fontSize:'10px', marginTop:'2px' }}>Informe {viewingEntry.informeId.length > 10 ? viewingEntry.informeId.substring(0, 8).toUpperCase() + '…' : viewingEntry.informeId.toUpperCase()} · {viewingEntry.fecha}</div>
           </div>
-          <ScaledPreview sec={viewingEntry.sections} pid={viewingEntry.informeId} qr={viewingEntry.qrDataUrl} pat={viewingEntry.patient} />
-          {viewingEntry.sections?.length > 0 && (
+
+          {viewingEntry.backendSynced === true ? (
+            <div style={{ background:'#0d1420', border:'1px solid #1e3a5f', borderRadius:'6px', padding:'10px' }}>
+              {historyPdfState === 'loading' && (
+                <div style={{ color:'#94a3b8', fontSize:'11px', padding:'22px 10px', textAlign:'center' }}>
+                  Cargando PDF autoritativo desde el servidor...
+                </div>
+              )}
+              {historyPdfState === 'error' && (
+                <div style={{ background:'#450a0a', border:'1px solid #7f1d1d', borderRadius:'6px', padding:'10px' }}>
+                  <div style={{ color:'#fca5a5', fontSize:'11px', lineHeight:'1.5' }}>{historyPdfError || 'No se pudo mostrar el PDF del servidor.'}</div>
+                  <div style={{ color:'#f59e0b', fontSize:'10px', marginTop:'8px' }}>
+                    Podés intentar abrirlo en otra pestaña o descargarlo directamente.
+                  </div>
+                </div>
+              )}
+              {historyPdfState === 'ready' && historyPdfUrl && (
+                <iframe
+                  title={`Vista PDF ${viewingEntry.informeId}`}
+                  src={historyPdfUrl}
+                  style={{ width:'100%', height:'500px', border:'none', background:'#fff', borderRadius:'4px' }}
+                />
+              )}
+            </div>
+          ) : (
+            <ScaledPreview sec={viewingEntry.sections} pid={viewingEntry.informeId} qr={viewingEntry.qrDataUrl} pat={viewingEntry.patient} />
+          )}
+
+          {(viewingEntry.sections?.length > 0 || viewingEntry.backendSynced === true) && (
             <div style={{ display:'flex', gap:'8px' }}>
               <button onClick={() => handlePreviewHistoryPdf(viewingEntry)}
                 style={{ flex:1, background:'#0f172a', color:'#93c5fd', borderRadius:'6px',
@@ -1595,6 +1728,12 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
                   display:'flex', alignItems:'center', justifyContent:'center', gap:'6px', cursor:'pointer' }}>
                 Descargar PDF
               </button>
+            </div>
+          )}
+
+          {historyPdfError && viewingEntry.backendSynced === true && historyPdfState !== 'error' && (
+            <div style={{ color:'#f59e0b', fontSize:'10px', background:'#1c1917', border:'1px solid #92400e', borderRadius:'6px', padding:'8px 10px' }}>
+              {historyPdfError}
             </div>
           )}
         </>

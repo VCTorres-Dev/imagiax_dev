@@ -17,10 +17,8 @@
     "README.md"
   ],
   "scripts": {
-    "dev": "cross-env NODE_ENV=development webpack --config .webpack/webpack.dev.js --watch --output-pathinfo",
     "build": "cross-env NODE_ENV=production webpack --config .webpack/webpack.prod.js",
-    "build:package-1": "yarn run build",
-    "start": "yarn run dev"
+    "build:package-1": "yarn run build"
   },
   "peerDependencies": {
     "@ohif/core": "3.13.0-beta.28",

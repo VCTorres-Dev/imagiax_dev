@@ -1,0 +1,40 @@
+IMAGIAX — Construcción segura de la extensión OHIF (imagiax.dev)
+
+1) Construir el UMD localmente (opcional / desarrollo)
+   cd ohif-extension-imagiax-ai
+   yarn install
+   yarn build
+   Salida: dist/ohif-extension-imagiax-ai.umd.js
+
+   Nota: este build standalone requiere toolchain de desarrollo (webpack, babel-loader,
+   cross-env, presets Babel, TypeScript). Si se parte de un clon limpio y esas
+   dependencias no están instaladas, usar el build del monorepo Viewers o agregar
+   devDependencies con lockfile antes de declarar este flujo reproducible.
+
+2) Integración en el monorepo OHIF Viewers
+   - Copiar o enlazar este paquete dentro del repo Viewers (misma versión @ohif/core / @ohif/ui que package.json).
+   - Registrar "@ohif/extension-imagiax-ai" en la configuración de extensiones del viewer si el build no lo integra estáticamente.
+   - Desde la raíz de Viewers: yarn install && yarn run build (o el script CI que usen).
+   - Reconstruir una imagen Docker etiquetada, nunca reemplazar `latest` sin rollback:
+     docker build -t orthanc-imagiax-ohif:<git_sha> .
+
+   Desarrollo interactivo/watch mode:
+   - No está definido como script standalone en este paquete.
+   - Usar el flujo del monorepo OHIF Viewers (`yarn run dev` / `lerna run dev:viewer`) después de integrar la extensión.
+
+3) Canary / rollback antes del cutover
+   - Guardar la imagen OHIF activa antes de reemplazarla:
+     docker image tag orthanc-imagiax-ohif:latest orthanc-imagiax-ohif:rollback-<fecha_o_sha>
+   - Levantar un contenedor canary en loopback/puerto temporal si el host lo permite.
+   - Validar que el bundle servido contiene el fix esperado y que app-config.js conserva rutas `/api` y `/pacs`.
+   - Validar manualmente en navegador: carga viewer, panel IMAGIAX, historial, Ver PDF y Descargar PDF.
+   - Solo después reemplazar el servicio `ohif` con la imagen etiquetada.
+
+4) Nginx / imagiax.dev
+   - El stack en OHIF Medical Imaging Viewer/orthanc-imagiax proxea "/" al contenedor ohif-imagiax.
+   - No suele hacer falta copiar dist/ a mano en el VPS si OHIF va en Docker: basta con rebuild de la imagen que embebe el viewer ya compilado.
+   - Si sirves estáticos sin Docker, copia el build del viewer (no solo la extensión) al root que defina tu server block, p. ej.:
+     rsync -av --delete ./platform/app/dist/ usuario@servidor:/var/www/ohif/
+
+5) Caché
+   - Tras desplegar, forzar recarga dura (Ctrl+F5) o invalidar caché CDN; los toggles antiguos suelen venir de un bundle JS viejo.
