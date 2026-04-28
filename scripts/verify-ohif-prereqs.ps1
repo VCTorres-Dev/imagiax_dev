@@ -31,6 +31,14 @@ Pass "SSH key presente"
 $inside = Run-Git -CommandArgs @("rev-parse", "--is-inside-work-tree")
 if (($inside | Select-Object -First 1).Trim() -ne "true") { Fail "No estás dentro de un repo git" }
 
+$repoRoot = (Run-Git -CommandArgs @("rev-parse", "--show-toplevel") | Select-Object -First 1).Trim()
+$canonicalVerifier = Join-Path $repoRoot "scripts/verify-ohif-canonical-source.ps1"
+if (-not (Test-Path $canonicalVerifier)) { Fail "No se encontró verificador canónico: $canonicalVerifier" }
+
+& powershell -ExecutionPolicy Bypass -File $canonicalVerifier
+if ($LASTEXITCODE -ne 0) { Fail "La verificación de fuente canónica OHIF falló" }
+Pass "Fuente OHIF canónica validada (hashes + tokens)"
+
 $branch = (Run-Git -CommandArgs @("branch", "--show-current") | Select-Object -First 1).Trim()
 $commit = (Run-Git -CommandArgs @("rev-parse", "HEAD") | Select-Object -First 1).Trim()
 Pass "Rama actual: $branch"
@@ -46,12 +54,25 @@ if (-not (Test-Path "ohif-extension-imagiax-ai\src\ImagiaxAiPanel.tsx")) { Fail 
 if (-not (Test-Path "ohif-extension-imagiax-ai\src\services\imagiaxApi.ts")) { Fail "Falta ohif-extension-imagiax-ai/src/services/imagiaxApi.ts" }
 Pass "Fuente OHIF canónica presente"
 
-$panel = Get-Content -Raw "ohif-extension-imagiax-ai\src\ImagiaxAiPanel.tsx"
-$api = Get-Content -Raw "ohif-extension-imagiax-ai\src\services\imagiaxApi.ts"
-if ($api -notlike "*fetchInformePdfBlob*") { Fail "imagiaxApi.ts no contiene fetchInformePdfBlob" }
-if ($panel -notlike "*Cargando PDF autoritativo*") { Fail "ImagiaxAiPanel.tsx no contiene UI de carga del PDF autoritativo" }
-if ($panel -like "*buildBackendPdfUrl*") { Fail "ImagiaxAiPanel.tsx todavía contiene buildBackendPdfUrl" }
-Pass "Tokens del fix OHIF presentes en fuente canónica"
+$tokenCargarMasInformes = "Cargar m$([char]0x00E1)s informes"
+$canonicalTokens = @(
+    "PDF_THEME",
+    "fetchHistorialFromBackend",
+    "HISTORY_PAGE_SIZE",
+    "Actualizar historial",
+    $tokenCargarMasInformes,
+    "downloadInformePdf",
+    "isGenerarInformeAcceptedResponse",
+    "getEstadoGeneracionInforme",
+    "pollAnalysisJob"
+)
+
+$sourceRoot = "ohif-extension-imagiax-ai\src"
+$allSourceText = (Get-ChildItem -Path $sourceRoot -Recurse -File -Include *.ts,*.tsx | ForEach-Object { Get-Content -Path $_.FullName -Raw -Encoding UTF8 }) -join "`n"
+foreach ($token in $canonicalTokens) {
+    if ($allSourceText -notlike "*$token*") { Fail "Fuente canónica no contiene token requerido: $token" }
+}
+Pass "Tokens canónicos OHIF presentes en fuente local"
 
 $prodContainerQ = ConvertTo-BashSingleQuoted $ProdContainer
 $prodImageQ = ConvertTo-BashSingleQuoted $ProdImage
@@ -121,4 +142,4 @@ if ($remoteOutput -contains "VIEWERS_GIT=missing") {
 }
 
 Pass "Puerto $CanaryPort libre en host remoto"
-Write-Host "OHIF PREREQS: PASS (revisión; no implica autorización de build/deploy)"
+Write-Host "OHIF PREREQS: PASS (solo revisión read-only; NO autoriza build/deploy/restart)"

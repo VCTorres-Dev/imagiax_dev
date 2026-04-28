@@ -48,15 +48,22 @@ docker exec "$CANARY_CONTAINER" sh -lc 'ls /usr/share/nginx/html/*.js /usr/share
   exit 5
 }
 
-docker exec "$CANARY_CONTAINER" sh -lc '({ gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null || true; cat /usr/share/nginx/html/*.js 2>/dev/null || true; } | grep -a "fetchInformePdfBlob" >/dev/null)' || {
-  echo "FAIL: bundle canary no contiene fetchInformePdfBlob" >&2
-  exit 6
-}
+bundle_stream='({ gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null || true; cat /usr/share/nginx/html/*.js 2>/dev/null || true; })'
+cargar_mas_token=$(printf 'Cargar m\303\241s informes')
 
-docker exec "$CANARY_CONTAINER" sh -lc '({ gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null || true; cat /usr/share/nginx/html/*.js 2>/dev/null || true; } | grep -a "Cargando PDF autoritativo" >/dev/null)' || {
-  echo "FAIL: bundle canary no contiene UI de PDF autoritativo" >&2
-  exit 7
-}
+for token in \
+  "downloadInformePdf" \
+  "getEstadoGeneracionInforme" \
+  "pollAnalysisJob" \
+  "fetchHistorialFromBackend" \
+  "Actualizar historial" \
+  "$cargar_mas_token"
+do
+  docker exec "$CANARY_CONTAINER" sh -lc "$bundle_stream | grep -a -F \"$token\" >/dev/null" || {
+    echo "FAIL: bundle canary no contiene token canónico '$token'" >&2
+    exit 6
+  }
+done
 
 echo "REMOTE_OK"
 '@
