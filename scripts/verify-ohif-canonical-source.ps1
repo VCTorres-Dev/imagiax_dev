@@ -39,6 +39,19 @@ function Normalize-Text([string]$Text) {
   return $Text.Normalize([System.Text.NormalizationForm]::FormC)
 }
 
+function Get-LfNormalizedSha256([string]$Path) {
+  $bytes = [System.IO.File]::ReadAllBytes($Path)
+  $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+  $normalizedText = $text.Replace("`r`n", "`n").Replace("`r", "`n")
+  $normalizedBytes = [System.Text.Encoding]::UTF8.GetBytes($normalizedText)
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return ([System.BitConverter]::ToString($sha256.ComputeHash($normalizedBytes))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+  }
+}
+
 $sourceFiles = Get-ChildItem -Path $srcRoot -Recurse -File -Include *.ts,*.tsx
 $allSourceText = Normalize-Text (($sourceFiles | ForEach-Object { Get-Content -Path $_.FullName -Raw -Encoding UTF8 }) -join "`n")
 
@@ -51,8 +64,8 @@ foreach ($token in $requiredTokens) {
     Write-Fail "Token missing: $token"
   }
 }
-$actualPanelHash = (Get-FileHash -Path $panelPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$actualApiHash = (Get-FileHash -Path $apiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$actualPanelHash = Get-LfNormalizedSha256 $panelPath
+$actualApiHash = Get-LfNormalizedSha256 $apiPath
 
 $hashErrors = New-Object System.Collections.Generic.List[string]
 
