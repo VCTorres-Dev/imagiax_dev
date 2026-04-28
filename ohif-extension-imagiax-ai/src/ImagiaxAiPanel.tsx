@@ -106,8 +106,15 @@ function calcAge(v: string): string {
   return v;
 }
 /** Limpia artefactos markdown que Gemini puede incluir en su respuesta */
-function stripMarkdown(text: string): string {
-  return text
+function toSafeText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+/** Limpia artefactos markdown que Gemini puede incluir en su respuesta */
+function stripMarkdown(text: unknown): string {
+  const safeText = toSafeText(text);
+  if (!safeText) return '';
+  return safeText
     .replace(/\*\*(.*?)\*\*/g, '$1')          // **bold** → bold
     .replace(/(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)/g, '$1') // *italic* → italic
     .replace(/^[-–—]{2,}\s*$/gm, '')           // -- separator lines
@@ -117,7 +124,10 @@ function stripMarkdown(text: string): string {
     .trim();
 }
 /** Elimina líneas que contengan rastros de IA/metadatos administrativos que puedan filtrarse */
-function stripAILanguage(text: string): string {
+function stripAILanguage(text: unknown): string {
+  const safeText = toSafeText(text);
+  if (!safeText) return '';
+
   // Términos que, si aparecen en una línea, indican que toda la línea debe eliminarse
   const AI_LINE_TERMS = [
     'inteligencia artificial',
@@ -147,7 +157,7 @@ function stripAILanguage(text: string): string {
   const normalize = (s: string) =>
     s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
-  const lines = text.split('\n');
+  const lines = safeText.split('\n');
   const filtered = lines.filter(line => {
     const n = normalize(line);
     return !AI_LINE_TERMS.some(term => n.includes(normalize(term)));
@@ -161,8 +171,9 @@ function stripAILanguage(text: string): string {
     .trim();
 }
 /** Convierte texto plano en secciones estructuradas (limpia markdown) */
-function parseReportSections(raw: string): ReportSection[] {
+function parseReportSections(raw: unknown): ReportSection[] {
   const clean = stripAILanguage(stripMarkdown(raw));
+  if (!clean) return [];
   const sections: ReportSection[] = [];
   let cur: ReportSection | null = null;
   clean.split('\n').forEach(l => {
@@ -933,9 +944,17 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       setProgress(100);
       setProgressMsg('¡Análisis completado!');
 
-      const reportText = response.informe_texto;
+      const reportText = toSafeText(response?.informe_texto).trim();
+      const id = toSafeText(response?.informe_id).trim();
+
+      if (!reportText || !id) {
+        throw new Error(
+          'El servidor finalizó el análisis pero no devolvió un informe válido. ' +
+          'Intentá nuevamente en unos segundos.'
+        );
+      }
+
       const sec = parseReportSections(reportText);
-      const id = response.informe_id;
 
       setSections(sec);
       setInformeId(id);

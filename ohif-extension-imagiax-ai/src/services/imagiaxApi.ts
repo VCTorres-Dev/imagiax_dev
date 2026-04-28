@@ -59,6 +59,13 @@ export interface GenerarInformeResponse {
   advertencia: string;
 }
 
+export interface GenerarInformeProcessingResponse {
+  job_id: string;
+  status: 'processing';
+}
+
+type GenerarInformeApiResponse = GenerarInformeResponse | GenerarInformeProcessingResponse;
+
 export interface PagoAutomaticoInfo {
   estado: 'approved' | 'rejected' | string;
   payment_id: string | null;
@@ -168,6 +175,15 @@ async function apiRequest<T>(
   options: RequestInit = {},
   timeoutMs: number = TIMEOUTS.DEFAULT
 ): Promise<T> {
+  const { data } = await apiRequestWithStatus<T>(path, options, timeoutMs);
+  return data;
+}
+
+async function apiRequestWithStatus<T>(
+  path: string,
+  options: RequestInit = {},
+  timeoutMs: number = TIMEOUTS.DEFAULT
+): Promise<{ status: number; data: T }> {
   const url = `${API_BASE_URL}${path}`;
   
   // Crear AbortController para timeout
@@ -195,7 +211,8 @@ async function apiRequest<T>(
       throw new ImagiaxApiError(response.status, detail);
     }
 
-    return response.json() as Promise<T>;
+    const data = (await response.json()) as T;
+    return { status: response.status, data };
   } catch (error) {
     // Detectar si el error es por abort (timeout)
     if (error instanceof Error && error.name === 'AbortError') {
@@ -206,6 +223,7 @@ async function apiRequest<T>(
     clearTimeout(timeoutId);
   }
 }
+
 
 // ── API Functions ──────────────────────────────────────────────────────────────
 
@@ -226,7 +244,11 @@ export async function generarInforme(
   studyInstanceUID: string,
   maxInstances: number = 5
 ): Promise<GenerarInformeResponse> {
-  return apiRequest<GenerarInformeResponse>(
+  const MAX_POLL_MS = 4 * 60_000;
+  const POLL_INTERVAL_MS = 2_000;
+  const pollStartedAt = Date.now();
+
+  const initial = await apiRequestWithStatus<GenerarInformeApiResponse>(
     '/generar/informe',
     {
       method: 'POST',
@@ -235,8 +257,42 @@ export async function generarInforme(
         max_instances: maxInstances,
       }),
     },
-    TIMEOUTS.GENERAR_INFORME // 2 minutos
+    TIMEOUTS.GENERAR_INFORME
   );
+
+  if (initial.status === 202 || isProcessingResponse(initial.data)) {
+    const jobId = isProcessingResponse(initial.data) ? initial.data.job_id : undefined;
+    if (!jobId) {
+      throw new ImagiaxApiError(502, 'Respuesta inválida del servidor: falta job_id para continuar el procesamiento del informe.');
+    }
+
+    while (Date.now() - pollStartedAt < MAX_POLL_MS) {
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+      const statusResponse = await apiRequestWithStatus<GenerarInformeApiResponse>(
+        `/generar/informe/estado/${encodeURIComponent(jobId)}`,
+        { method: 'GET' },
+        TIMEOUTS.DEFAULT
+      );
+
+      if (statusResponse.status === 202 || isProcessingResponse(statusResponse.data)) {
+        continue;
+      }
+
+      if (isValidGenerarInformeResponse(statusResponse.data)) {
+        return statusResponse.data;
+      }
+
+      throw new ImagiaxApiError(502, 'El análisis terminó, pero el servidor devolvió un informe incompleto (faltan informe_id o informe_texto).');
+    }
+
+    throw new ImagiaxTimeoutError(MAX_POLL_MS, `/generar/informe/estado/${encodeURIComponent(jobId)}`);
+  }
+
+  if (isValidGenerarInformeResponse(initial.data)) {
+    return initial.data;
+  }
+
+  throw new ImagiaxApiError(502, 'Respuesta inválida del servidor: no se pudo obtener un informe final válido.');
 }
 
 /**
@@ -478,4 +534,19 @@ export async function fetchInformePdfBlob(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function isProcessingResponse(payload: unknown): payload is GenerarInformeProcessingResponse {
+  if (!payload || typeof payload !== 'object') return false;
+  const candidate = payload as Record<string, unknown>;
+  return candidate.status === 'processing' && typeof candidate.job_id === 'string' && candidate.job_id.trim().length > 0;
+}
+
+function isValidGenerarInformeResponse(payload: unknown): payload is GenerarInformeResponse {
+  if (!payload || typeof payload !== 'object') return false;
+  const candidate = payload as Record<string, unknown>;
+  return (
+    typeof candidate.informe_id === 'string' && candidate.informe_id.trim().length > 0 &&
+    typeof candidate.informe_texto === 'string' && candidate.informe_texto.trim().length > 0
+  );
 }
