@@ -20,29 +20,57 @@ Validar una imagen candidata de OHIF con la extensión `imagiax-ai` integrada, s
 - La imagen OHIF embebe `platform/app/dist`; los cambios en `ohif-extension-imagiax-ai/src/**` requieren rebuild de OHIF.
 - En el servidor existe `/root/imagiax/OHIF Medical Imaging Viewer/Viewers`, pero no debe tratarse como fuente reproducible hasta reconciliarlo contra el commit candidato.
 
-## Gate previo obligatorio
+## Gate previo obligatorio (fuente canónica)
 
-Antes de cualquier build o contenedor nuevo:
+Antes de cualquier sync remoto, build o contenedor nuevo:
 
 1. El worktree local debe estar limpio y en una rama deployable.
 2. Registrar el commit exacto candidato.
-3. Confirmar que el cambio OHIF vive en `ohif-extension-imagiax-ai/src/**`.
-4. Reconciliar la extensión en el build context de OHIF:
-   - fuente canónica: `ohif-extension-imagiax-ai/` del commit candidato;
-   - destino de build: `OHIF Medical Imaging Viewer/Viewers/extensions/imagiax-ai/` o el path equivalente del monorepo;
-   - comparar hashes/diff antes de build.
-5. Guardar rollback de OHIF actual:
-   - image id activo;
-   - tag rollback (`orthanc-imagiax-ohif:rollback-<fecha>-<sha>`);
-   - opcional: `docker save` a `canary-artifacts/` si no hay registry confiable.
+3. Confirmar/restaurar fuente canónica local en `ohif-extension-imagiax-ai/`.
+4. Ejecutar gate canónico (local):
 
-Chequeo automatizado de prerequisitos (solo lectura):
+```powershell
+./scripts/verify-ohif-canonical-source.ps1
+```
+
+5. Ejecutar prerequisitos remotos (solo lectura):
 
 ```powershell
 ./scripts/verify-ohif-prereqs.ps1
 ```
 
+6. Guardar rollback de OHIF actual:
+   - image id activo;
+   - tag rollback (`orthanc-imagiax-ohif:rollback-<fecha>-<sha>`);
+   - opcional: `docker save` a `canary-artifacts/` si no hay registry confiable.
+
 Si el worktree todavía tiene cambios locales durante una revisión previa, se puede usar `-AllowDirtyTree`, pero **nunca** para autorizar build/deploy.
+
+## Fase dedicada: remote sync (antes de build)
+
+> No ejecutar sin autorización explícita.
+
+Objetivo: sincronizar exactamente la extensión canónica del commit local al build context remoto, y bloquear build si hay desvío.
+
+1. **Origen canónico (local):** `ohif-extension-imagiax-ai/` del commit candidato.
+2. **Destino build remoto:** `Viewers/extensions/imagiax-ai/`.
+3. Sincronizar contenido (sin tocar nginx ni tráfico público).
+4. Revalidar tokens/hash en destino remoto y comparar diff/hash contra origen.
+5. Si hay mismatch, **NO build** hasta reconciliar.
+
+Evidencia mínima esperada post-sync:
+
+- hash/diff origen vs destino sin diferencias materiales;
+- tokens canónicos presentes en bundle fuente restaurada:
+  - `PDF_THEME`
+  - `fetchHistorialFromBackend`
+  - `HISTORY_PAGE_SIZE`
+  - `Actualizar historial`
+  - `Cargar más informes`
+  - `downloadInformePdf`
+  - `isGenerarInformeAcceptedResponse`
+  - `getEstadoGeneracionInforme`
+  - `pollAnalysisJob`
 
 ## Build candidato
 
@@ -78,17 +106,20 @@ El ejemplo anterior muestra solo la forma del aislamiento. Para una validación 
 - `window.__IMAGIAX_CONFIG__ = { backend_url: '/api' }`
 - data source Orthanc con rutas `/pacs/...`
 
+El canary en `127.0.0.1:18080` es loopback-only: no expone tráfico público, no requiere cambios de DNS/LB y **no requiere tocar nginx**.
+
 ## Smoke técnico del canary
 
 Ejecutar contra `http://127.0.0.1:18080` desde el host remoto:
 
 ```bash
 curl -fsS http://127.0.0.1:18080/ >/dev/null
-docker exec ohif-imagiax-canary sh -lc 'gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null | grep -a "fetchInformePdfBlob" >/dev/null'
-docker exec ohif-imagiax-canary sh -lc 'gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null | grep -a "Cargando PDF autoritativo" >/dev/null'
+docker exec ohif-imagiax-canary sh -lc 'gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null | grep -a "fetchHistorialFromBackend" >/dev/null'
+docker exec ohif-imagiax-canary sh -lc 'gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null | grep -a "downloadInformePdf" >/dev/null'
+docker exec ohif-imagiax-canary sh -lc 'gzip -cd /usr/share/nginx/html/*.js.gz 2>/dev/null | grep -a "pollAnalysisJob" >/dev/null'
 ```
 
-Estos checks solo validan que el bundle contiene el fix esperado. No reemplazan la aceptación manual.
+Estos checks validan integridad técnica mínima del bundle canary. **Smoke técnico != aceptación manual funcional.**
 
 Smoke automatizado equivalente:
 
@@ -103,11 +134,13 @@ Con datos controlados/no sensibles:
 1. Abrir viewer OHIF canary.
 2. Confirmar que carga el panel IMAGIAX.
 3. Login/sesión válida.
-4. Abrir historial con un informe `backendSynced=true`.
-5. `Ver PDF` debe mostrar estado de carga y luego iframe con PDF oficial del backend.
-6. `Descargar PDF` debe descargar el mismo artefacto.
-7. Si se cierra sesión, el panel debe mostrar error explícito, no pantalla blanca silenciosa.
-8. Una entrada legacy sin `backendSynced=true` puede usar fallback local.
+4. Ejecutar análisis y confirmar flujo async/polling hasta estado final (sin bloqueo de UI).
+5. Abrir historial y confirmar que carga desde backend.
+6. Verificar acción `Actualizar historial`.
+7. Verificar `Cargar más informes` cuando haya más páginas.
+8. `Ver PDF`/preview debe usar ruta backend y renderizar correctamente.
+9. `Descargar PDF` debe descargar el artefacto backend esperado.
+10. Confirmar ausencia de regresión `.replace` sobre `undefined`.
 
 ## Cutover
 
