@@ -27,6 +27,7 @@ Antes de cualquier sync remoto, build o contenedor nuevo:
 1. El worktree local debe estar limpio y en una rama deployable.
 2. Registrar el commit exacto candidato.
 3. Confirmar/restaurar fuente canónica local en `ohif-extension-imagiax-ai/`.
+   - El panel canónico debe usar el asset versionado `src/logoBase64.ts`; no depender de `src/logo-andes-salud.png` porque ese PNG no existe en el snapshot/build context.
 4. Ejecutar gate canónico (local):
 
 ```powershell
