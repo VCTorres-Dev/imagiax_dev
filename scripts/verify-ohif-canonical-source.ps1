@@ -1,6 +1,6 @@
 param(
-  [string]$ExpectedPanelSha256 = 'c05675f4b499e46b7e57213447451fd94d9b5c2b034a387ab3a0e6bd2bc7c91c',
-  [string]$ExpectedApiSha256 = 'dc56901738f0b8477f17cbc290c1adda5e3c37a8aa1c54a6ad185c6974b8a9d0'
+  [string]$ExpectedPanelSha256 = '03137604ffd7eaf990da2af5dc0dd458518a75774ec4d2feeb564d15b4fd8e8c',
+  [string]$ExpectedApiSha256 = 'ff94bd0eba528b3dd0f7723304a70fb82e20b234a8634cb6cff4e4f0c89ffa08'
 )
 
 Set-StrictMode -Version Latest

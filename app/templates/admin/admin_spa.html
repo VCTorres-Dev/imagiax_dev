@@ -1304,11 +1304,11 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
           </div>
           <div class="stat-card c-yellow">
             <div class="stat-card-head">
-              <div class="label">Pendientes de revisión</div>
+              <div class="label" title="Informes en estado pendiente: generados y aún sin decisión médica final">Sin confirmar</div>
               <div class="stat-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
             </div>
             <div class="value" id="s-pendientes" style="color:var(--yellow)">—</div>
-            <div class="sub">Requieren acción médica</div>
+            <div class="sub" id="s-pendientes-sub">Generados pendientes de revisión médica</div>
           </div>
           <div class="stat-card c-green">
             <div class="stat-card-head">
@@ -1440,7 +1440,7 @@ h1,h2,h3,h4{font-family:var(--font-heading)}
           <div class="search-bar">
             <select id="inf-estado-filter" onchange="loadInformes(0)" aria-label="Filtrar por estado de informe">
               <option value="">Todos los estados</option>
-              <option value="pendiente">Pendiente</option>
+              <option value="pendiente">Sin confirmar (pendiente)</option>
               <option value="aceptado">Aceptado</option>
               <option value="editado_aceptado">Editado/Aceptado</option>
               <option value="rechazado">Rechazado</option>
@@ -2268,6 +2268,16 @@ async function loadDashboard() {
   document.getElementById('s-informes').textContent = d.informes.total;
   document.getElementById('s-informes-sub').textContent = `${d.informes.hoy} hoy · ${d.informes.semana} esta semana`;
   document.getElementById('s-pendientes').textContent = d.informes.pendiente;
+  const generatedAwaitingReview = Number(d.informes.generated_awaiting_review || 0);
+  const pendingBuckets = d.informes.pending_age_buckets || {};
+  const pending0To24 = Number(pendingBuckets['0_24h'] || 0);
+  const pending24To72 = Number(pendingBuckets['24_72h'] || 0);
+  const pending72Plus = Number(pendingBuckets['72h_plus'] || 0);
+  const pendientesSub = document.getElementById('s-pendientes-sub');
+  if (pendientesSub) {
+    pendientesSub.textContent = `${generatedAwaitingReview} generados esperando revisión`;
+    pendientesSub.title = `Antigüedad sin confirmar: 0-24h ${pending0To24}, 24-72h ${pending24To72}, +72h ${pending72Plus}`;
+  }
   document.getElementById('s-creditos').textContent = d.creditos.disponibles;
   document.getElementById('s-creditos-sub').textContent = `De ${d.creditos.total_comprados} comprados`;
   document.getElementById('s-ingresos').textContent = '$' + (d.ingresos_total_clp || 0).toLocaleString('es-CL');
@@ -2309,12 +2319,13 @@ async function loadDashboard() {
   // Estado chart — tiles con accent lines
   const estadoGrid = document.getElementById('estado-grid');
   const estadoData = [
-    {label:'Pendientes', val: d.informes.pendiente, color:'var(--yellow)', accent:'rgba(245,158,11,.45)', filtro:'pendiente'},
+    {label:'Sin confirmar', val: d.informes.pendiente, color:'var(--yellow)', accent:'rgba(245,158,11,.45)', filtro:'pendiente', hint: `0-24h: ${pending0To24} · 24-72h: ${pending24To72} · +72h: ${pending72Plus}`},
+    {label:'Generados en espera', val: generatedAwaitingReview, color:'#fbbf24', accent:'rgba(251,191,36,.45)', filtro:'pendiente', hint:'Pendiente + informe generado no vacío'},
     {label:'Aceptados',  val: d.informes.aceptado,  color:'var(--green)',  accent:'rgba(34,197,94,.45)',  filtro:'aceptado'},
     {label:'Rechazados', val: d.informes.rechazado, color:'var(--red)',    accent:'rgba(239,68,68,.45)',  filtro:'rechazado'},
   ];
   estadoGrid.innerHTML = estadoData.map(e =>
-    `<div class="estado-tile" style="--tile-accent:${e.accent}" onclick="navigateToInformes('${e.filtro}')" title="Ver informes ${e.label.toLowerCase()}">
+    `<div class="estado-tile" style="--tile-accent:${e.accent}" onclick="navigateToInformes('${e.filtro}')" title="${escHtml((e.hint || `Ver informes ${e.label.toLowerCase()}`).toString())}">
       <div class="tile-num" style="color:${e.color}">${e.val}</div>
       <div class="tile-label">${e.label}</div>
     </div>`
@@ -2800,7 +2811,13 @@ async function loadSistema() {
     const orthancOk = comp.orthanc && comp.orthanc.estado === 'ok';
     const apiOk = d.estado === 'ok' || d.estado === 'degradado';
     const gemini = comp.gemini || {};
-    const geminiSem = gemini.semaforo || (gemini.estado === 'ok' ? 'green' : (gemini.estado === 'degradado' ? 'yellow' : 'red'));
+    const geminiStateRaw = (gemini.estado || '').toString().toLowerCase();
+    const geminiState = geminiStateRaw === 'ok' || geminiStateRaw === 'degradado' || geminiStateRaw === 'error'
+      ? geminiStateRaw
+      : (gemini.semaforo === 'green' ? 'ok' : (gemini.semaforo === 'yellow' ? 'degradado' : 'error'));
+    const geminiSem = gemini.semaforo || (geminiState === 'ok' ? 'green' : (geminiState === 'degradado' ? 'yellow' : 'red'));
+    const geminiReasonCode = (gemini.reason_code || '').toString().toLowerCase();
+    const geminiReasonText = normalizeGeminiReason(geminiReasonCode, gemini.reason || gemini.reason_detail || gemini.detalle || '');
     const geminiBadge = geminiSem === 'green' ? 'badge-green' : (geminiSem === 'yellow' ? 'badge-yellow' : 'badge-red');
 
     const topStatus = document.getElementById('sys-status');
@@ -2827,7 +2844,7 @@ async function loadSistema() {
           <div class="svc-dot ${geminiSem === 'green' ? 'ok' : (geminiSem === 'yellow' ? 'warn' : 'error')}"></div>
           <div class="svc-name">Gemini IA</div>
           <div class="svc-detail">${escHtml(gemini.auth_mode || 'unconfigured')} · ${escHtml(gemini.modelo || '\u2014')}</div>
-          <span class="badge-pill ${geminiBadge}" style="flex-shrink:0">${escHtml((gemini.reason || gemini.estado || 'Sin diagnóstico').toString())}</span>
+          <span class="badge-pill ${geminiBadge}" style="flex-shrink:0" title="${escHtml(geminiReasonCode || 'sin_codigo')}">${escHtml(geminiReasonText)}</span>
         </div>`
       + '</div>';
 
@@ -2885,6 +2902,32 @@ function summarizeGeminiCreds(value) {
   const vertex = value.vertex_project_configured ? 'vertex_project:yes' : 'vertex_project:no';
   const sa = value.service_account_configured ? 'service_account:yes' : 'service_account:no';
   return `${api} · ${vertex} · ${sa}`;
+}
+
+function normalizeGeminiReason(reasonCode, reasonText) {
+  const code = (reasonCode || '').toString().toLowerCase();
+  const mapping = {
+    ok_api_key: 'Operativo con API key configurada.',
+    ok_vertex_ai: 'Operativo con Vertex AI y service account.',
+    missing_api_key: 'Falta configurar GEMINI_API_KEY.',
+    missing_vertex_project: 'Falta configurar VERTEX_AI_PROJECT.',
+    missing_service_account: 'Falta configurar GOOGLE_APPLICATION_CREDENTIALS.',
+    missing_vertex_project_or_service_account: 'Falta VERTEX_AI_PROJECT o GOOGLE_APPLICATION_CREDENTIALS.',
+    missing_api_key_and_vertex_config: 'Gemini no configurado: faltan credenciales de acceso.',
+    invalid_vertex_credentials: 'Credenciales de Vertex inválidas o no accesibles.',
+    auth_failed: 'Falló la autenticación de Gemini. Revisá configuración de acceso.',
+  };
+  if (code && mapping[code]) return mapping[code];
+
+  const raw = (reasonText || '').toString().trim();
+  if (!raw) return 'Sin diagnóstico disponible.';
+
+  // Evitar exponer posibles secretos en textos heredados.
+  const redacted = raw
+    .replace(/(api[_-]?key\s*[:=]\s*)([^\s,;]+)/ig, '$1[redactado]')
+    .replace(/(token\s*[:=]\s*)([^\s,;]+)/ig, '$1[redactado]')
+    .replace(/(secret\s*[:=]\s*)([^\s,;]+)/ig, '$1[redactado]');
+  return redacted;
 }
 
 // ── Modales ────────────────────────────────────────────────────────────────────

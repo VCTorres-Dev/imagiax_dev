@@ -49,29 +49,35 @@ def _gemini_health_payload() -> dict[str, object]:
         auth_mode = "api_key"
         estado = "ok"
         semaforo = "green"
-        reason = "Gemini configurado por API key."
+        reason_code = "ok_api_key"
+        reason_detail = "Gemini configurado por API key."
     elif mode_raw == "vertex_ai":
         auth_mode = "vertex_service_account"
         if vertex_project_configured and service_account_configured:
             estado = "ok"
             semaforo = "green"
-            reason = "Gemini configurado por Vertex AI con service account."
+            reason_code = "ok_vertex_ai"
+            reason_detail = "Gemini configurado por Vertex AI con service account."
         else:
             estado = "degradado"
             semaforo = "yellow"
-            reason = "Falta VERTEX_AI_PROJECT o GOOGLE_APPLICATION_CREDENTIALS para Vertex AI."
+            reason_code = "missing_vertex_project_or_service_account"
+            reason_detail = "Falta VERTEX_AI_PROJECT o GOOGLE_APPLICATION_CREDENTIALS para Vertex AI."
     else:
         auth_mode = "unconfigured"
         estado = "error"
         semaforo = "red"
-        reason = "Gemini no configurado: faltan API key y credenciales Vertex."
+        reason_code = "missing_api_key_and_vertex_config"
+        reason_detail = "Gemini no configurado: faltan API key y credenciales Vertex."
 
     return {
         "estado": estado,
         "semaforo": semaforo,
         "auth_mode": auth_mode,
         "modelo": settings.GEMINI_MODEL,
-        "reason": reason,
+        "reason": reason_detail,
+        "reason_code": reason_code,
+        "reason_detail": reason_detail,
         "checks": {
             "api_key_configured": api_key_configured,
             "vertex_project_configured": vertex_project_configured,

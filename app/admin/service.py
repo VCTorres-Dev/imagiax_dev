@@ -90,6 +90,23 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, Any]:
                 SELECT
                     COUNT(*)                                                          AS total,
                     COUNT(*) FILTER (WHERE estado = 'pendiente')                     AS pendiente,
+                    COUNT(*) FILTER (
+                        WHERE estado = 'pendiente'
+                          AND COALESCE(TRIM(informe_generado), '') <> ''
+                    )                                                                 AS generated_awaiting_review,
+                    COUNT(*) FILTER (
+                        WHERE estado = 'pendiente'
+                          AND created_at >= NOW() - INTERVAL '24 hours'
+                    )                                                                 AS pendiente_0_24h,
+                    COUNT(*) FILTER (
+                        WHERE estado = 'pendiente'
+                          AND created_at < NOW() - INTERVAL '24 hours'
+                          AND created_at >= NOW() - INTERVAL '72 hours'
+                    )                                                                 AS pendiente_24_72h,
+                    COUNT(*) FILTER (
+                        WHERE estado = 'pendiente'
+                          AND created_at < NOW() - INTERVAL '72 hours'
+                    )                                                                 AS pendiente_72h_plus,
                     COUNT(*) FILTER (WHERE estado IN ('aceptado', 'editado_aceptado')) AS aceptado,
                     COUNT(*) FILTER (WHERE estado = 'rechazado')                     AS rechazado,
                     COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours') AS hoy,
@@ -108,6 +125,10 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, Any]:
                 uc.recepcion        AS u_recepcion,
                 ic.total            AS inf_total,
                 ic.pendiente        AS inf_pendiente,
+                ic.generated_awaiting_review AS inf_generated_awaiting_review,
+                ic.pendiente_0_24h  AS inf_pendiente_0_24h,
+                ic.pendiente_24_72h AS inf_pendiente_24_72h,
+                ic.pendiente_72h_plus AS inf_pendiente_72h_plus,
                 ic.aceptado         AS inf_aceptado,
                 ic.rechazado        AS inf_rechazado,
                 ic.hoy              AS inf_hoy,
@@ -151,6 +172,12 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, Any]:
         "informes": {
             "total": int(row["inf_total"]),
             "pendiente": int(row["inf_pendiente"]),
+            "generated_awaiting_review": int(row["inf_generated_awaiting_review"]),
+            "pending_age_buckets": {
+                "0_24h": int(row["inf_pendiente_0_24h"]),
+                "24_72h": int(row["inf_pendiente_24_72h"]),
+                "72h_plus": int(row["inf_pendiente_72h_plus"]),
+            },
             "aceptado": int(row["inf_aceptado"]),
             "rechazado": int(row["inf_rechazado"]),
             "hoy": int(row["inf_hoy"]),
@@ -188,6 +215,12 @@ async def get_dashboard_stats(pool: asyncpg.Pool) -> dict[str, Any]:
                 "scope": "all_reports",
                 "definitions": {
                     "pendiente": "COUNT(*) WHERE estado = 'pendiente'",
+                    "generated_awaiting_review": "COUNT(*) WHERE estado = 'pendiente' AND informe_generado no vacío",
+                    "pending_age_buckets": {
+                        "0_24h": "COUNT(*) WHERE estado = 'pendiente' AND created_at >= NOW()-24h",
+                        "24_72h": "COUNT(*) WHERE estado = 'pendiente' AND created_at entre 24h y 72h",
+                        "72h_plus": "COUNT(*) WHERE estado = 'pendiente' AND created_at < NOW()-72h",
+                    },
                     "aceptado": "COUNT(*) WHERE estado IN ('aceptado', 'editado_aceptado')",
                     "rechazado": "COUNT(*) WHERE estado = 'rechazado'",
                 },
