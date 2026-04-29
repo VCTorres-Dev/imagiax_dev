@@ -7,6 +7,8 @@ import {
   getEstadoGeneracionInforme,
   guardarDecision,
   downloadInformePdf,
+  getInformePdfPreview,
+  revokeInformePdfPreviewUrl,
   checkSalud,
   checkSaludV2,
   checkEstadoCreditos,
@@ -1212,7 +1214,8 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
   const [pdfLoading, setPdfLoading] = useState(true);
   const [pdfError, setPdfError] = useState('');
   const [viewerReady, setViewerReady] = useState(false);
-  const [viewerTimedOut, setViewerTimedOut] = useState(false);
+  const [viewerRenderError, setViewerRenderError] = useState('');
+  const [viewerHelpVisible, setViewerHelpVisible] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
 
   // Close on Escape key only.
@@ -1233,12 +1236,14 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
 
   useEffect(() => {
     let active = true;
-    let objectUrl = '';
+    let createdPreviewUrl = '';
 
     const loadPdf = async () => {
       setPdfLoading(true);
       setPdfError('');
       setPdfObjectUrl('');
+      setViewerRenderError('');
+      setViewerHelpVisible(false);
       if (!entryHasPdf) {
         const errorMessage = 'Este informe del historial no tiene un identificador válido para abrir su PDF.';
         setPdfLoading(false);
@@ -1248,11 +1253,18 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
       }
       try {
         const reportId = getHistoryInformeId(entry);
-        const blob = getCachedPdfBlob(reportId) || await downloadInformePdf(reportId);
+        const cachedBlob = getCachedPdfBlob(reportId);
+        if (cachedBlob) {
+          createdPreviewUrl = URL.createObjectURL(cachedBlob);
+          if (!active) return;
+          setPdfObjectUrl(createdPreviewUrl);
+          return;
+        }
+        const preview = await getInformePdfPreview(reportId);
         if (!active) return;
-        cachePdfBlob(reportId, blob);
-        objectUrl = URL.createObjectURL(blob);
-        setPdfObjectUrl(objectUrl);
+        cachePdfBlob(reportId, preview.blob);
+        createdPreviewUrl = preview.objectUrl;
+        setPdfObjectUrl(preview.objectUrl);
       } catch (err) {
         if (!active) return;
         let errorMessage = 'No se pudo cargar la vista previa del PDF.';
@@ -1271,7 +1283,7 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
 
     return () => {
       active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (createdPreviewUrl) revokeInformePdfPreviewUrl(createdPreviewUrl);
     };
   }, [entry, entryHasPdf, onHistoryPdfError, reloadNonce]);
 
@@ -1288,19 +1300,27 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
   }, [entry, entryHasPdf, onHistoryPdfError]);
 
   useEffect(() => {
+    if (pdfLoading || pdfError || viewerRenderError || !pdfObjectUrl || viewerReady) {
+      setViewerHelpVisible(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setViewerHelpVisible(true);
+    }, 5000);
+
+    return () => window.clearTimeout(timer);
+  }, [pdfLoading, pdfError, pdfObjectUrl, viewerReady, viewerRenderError]);
+
+  useEffect(() => {
     if (pdfLoading || pdfError || !pdfObjectUrl) {
       setViewerReady(false);
-      setViewerTimedOut(false);
+      setViewerRenderError('');
       return;
     }
 
     setViewerReady(false);
-    setViewerTimedOut(false);
-    const timer = window.setTimeout(() => {
-      setViewerTimedOut(true);
-    }, 5000);
-
-    return () => window.clearTimeout(timer);
+    setViewerRenderError('');
   }, [pdfLoading, pdfError, pdfObjectUrl]);
 
   const handleOpenPdf = useCallback(() => {
@@ -1314,13 +1334,21 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
   const handleRetryLoadPdf = useCallback(() => {
     setPdfError('');
     setViewerReady(false);
-    setViewerTimedOut(false);
+    setViewerRenderError('');
+    setViewerHelpVisible(false);
     setReloadNonce(prev => prev + 1);
   }, []);
 
   const handleViewerLoad = useCallback(() => {
     setViewerReady(true);
-    setViewerTimedOut(false);
+    setViewerRenderError('');
+    setViewerHelpVisible(false);
+  }, []);
+
+  const handleViewerError = useCallback(() => {
+    setViewerReady(false);
+    setViewerHelpVisible(false);
+    setViewerRenderError('No se pudo renderizar el visor PDF embebido en este navegador.');
   }, []);
 
   const handleDownloadCurrentPdf = useCallback(() => {
@@ -1472,16 +1500,16 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
 
           {!pdfLoading && !pdfError && pdfObjectUrl && (
             <div style={{ width:'100%', minHeight:'70vh', border:'1px solid #1e293b', borderRadius:'8px', background:'#fff', position:'relative' }}>
-              {!viewerReady && !viewerTimedOut && (
+              {!viewerReady && !viewerRenderError && (
                 <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(255,255,255,0.92)', color:'#1e3a5f', fontSize:'12px', fontWeight:'600', zIndex:2 }}>
                   Cargando visor PDF...
                 </div>
               )}
 
-              {viewerTimedOut && !viewerReady && (
+              {!!viewerRenderError && (
                 <div style={{ position:'absolute', inset:'18px', border:'1px solid #f59e0b', borderRadius:'8px', background:'#fff7ed', color:'#92400e', fontSize:'12px', padding:'14px', lineHeight:'1.6', zIndex:3 }}>
-                  No se pudo renderizar la previsualización embebida en este navegador.
-                  <div style={{ marginTop:'8px' }}>Usá “Abrir PDF” o “Descargar PDF” para evitar pantalla en blanco.</div>
+                  {viewerRenderError}
+                  <div style={{ marginTop:'8px' }}>Usá “Abrir PDF” o “Descargar PDF” para continuar.</div>
                   <div style={{ marginTop:'10px', display:'flex', gap:'8px', flexWrap:'wrap' }}>
                     <button
                       onClick={handleRetryLoadPdf}
@@ -1518,17 +1546,25 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
                 </div>
               )}
 
+              {viewerHelpVisible && !viewerReady && !viewerRenderError && (
+                <div style={{ position:'absolute', top:'18px', left:'18px', right:'18px', border:'1px solid #1d4ed8', borderRadius:'8px', background:'#eff6ff', color:'#1e3a8a', fontSize:'11px', padding:'10px 12px', lineHeight:'1.5', zIndex:3 }}>
+                  El visor puede tardar en algunos navegadores. Si no aparece en unos segundos, podés usar “Abrir PDF” o “Descargar PDF”.
+                </div>
+              )}
+
               <object
                 aria-label={`PDF ${entry.informeId}`}
                 data={pdfObjectUrl}
                 type="application/pdf"
                 onLoad={handleViewerLoad}
+                onError={handleViewerError}
                 style={{ width:'100%', height:'100%', minHeight:'70vh', border:'none', borderRadius:'8px', background:'#fff' }}
               >
                 <iframe
                   title={`PDF ${entry.informeId}`}
                   src={pdfObjectUrl}
                   onLoad={handleViewerLoad}
+                  onError={handleViewerError}
                   style={{ width:'100%', height:'100%', minHeight:'70vh', border:'none', borderRadius:'8px', background:'#fff' }}
                 />
               </object>
@@ -1722,6 +1758,13 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
   const [historyTotal,     setHistoryTotal]     = useState(0);
   const historyCursorRef = useRef<string | null>(null);
 
+  const clearPdfUrlSafely = useCallback(() => {
+    setPdfUrl(prev => {
+      if (prev) revokeInformePdfPreviewUrl(prev);
+      return '';
+    });
+  }, []);
+
   // Sincronizar caché localStorage cada vez que el historial en memoria cambia
   useEffect(() => {
     try {
@@ -1749,11 +1792,20 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       const entries = (data.items || []).map(informeDbToHistoryEntry);
       let mergedEntries: HistoryEntry[] = [];
       setHistory(prev => {
-        mergedEntries = dedupeHistoryEntriesByInformeId(append ? [...prev, ...entries] : entries);
+        if (append) {
+          mergedEntries = dedupeHistoryEntriesByInformeId([...prev, ...entries]);
+        } else {
+          const preservedTarget = Math.min(MAX_HISTORY_ENTRIES, Math.max(prev.length, entries.length));
+          mergedEntries = dedupeHistoryEntriesByInformeId([...entries, ...prev]).slice(0, preservedTarget);
+        }
         return mergedEntries;
       });
-      setHistoryHasMore(Boolean(data.has_more));
-      setHistoryNextCursor(data.next_cursor || null);
+      const derivedCursor = mergedEntries.length > 0
+        ? getHistoryInformeId(mergedEntries[mergedEntries.length - 1]) || null
+        : null;
+      const canLoadMore = Boolean(data.has_more) || ((data.total || 0) > mergedEntries.length);
+      setHistoryHasMore(canLoadMore);
+      setHistoryNextCursor(append ? (data.next_cursor || derivedCursor) : derivedCursor);
       setHistoryTotal(Math.max(data.total || 0, mergedEntries.length));
     } catch (err) {
       if (err instanceof ImagiaxApiError && err.status === 401) {
@@ -2067,7 +2119,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     setActiveTab('analisis');
     setProgress(0);
     setProgressMsg('Conectando con servidor...');
-    setPdfUrl('');
+    clearPdfUrlSafely();
     setPdfError('');
     setPdfConfirmed(false);
     setLegalAccepted(false);
@@ -2127,15 +2179,15 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       _clearMilestones();
       handleAnalysisError(err);
     }
-  }, [activeAnalysisJob, authUser, clearActiveAnalysis, completeAnalysis, handleAnalysisError, notaClinica, pollAnalysisJob, state, studyUID]);
+  }, [activeAnalysisJob, authUser, clearActiveAnalysis, clearPdfUrlSafely, completeAnalysis, handleAnalysisError, notaClinica, pollAnalysisJob, state, studyUID]);
 
   const handleGeneratePdf = useCallback(async () => {
     setIsGeneratingPdf(true);
     setPdfError('');
+    clearPdfUrlSafely();
     try {
-      const blob = await downloadInformePdf(informeId);
-      const url = URL.createObjectURL(blob);
-      setPdfUrl(url);
+      const preview = await getInformePdfPreview(informeId);
+      setPdfUrl(preview.objectUrl);
     } catch (err) {
       if (err instanceof ImagiaxApiError && err.status === 401) {
         setAuthUser(null);
@@ -2146,6 +2198,26 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     } finally {
       setIsGeneratingPdf(false);
     }
+  }, [clearPdfUrlSafely, informeId]);
+
+  const handleDownloadFinalBackendPdf = useCallback(async () => {
+    if (!informeId) return;
+    setPdfError('');
+    try {
+      const blob = getCachedPdfBlob(informeId) || await downloadInformePdf(informeId);
+      cachePdfBlob(informeId, blob);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${informeId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setPdfError('No se pudo descargar el PDF final de backend. Reintentá en unos segundos.');
+      console.error('Error descargando PDF final de backend:', err);
+    }
   }, [informeId]);
 
   // FIX: handleConfirmar saves to backend + generates PDF
@@ -2153,6 +2225,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     setIsGeneratingPdf(true);
     setPdfError('');
     setApiError(''); // Clear previous errors
+    clearPdfUrlSafely();
     try {
       // Determine if the report was edited
       const wasEdited = editingReport || editSections.length > 0;
@@ -2160,7 +2233,6 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       const estado = wasEdited ? 'editado_aceptado' : 'aceptado';
 
       // Save decision to backend
-      let saveSucceeded = true;
       try {
         await guardarDecision(informeId, estado as any, finalText);
       } catch (err) {
@@ -2169,7 +2241,6 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
           return;
         }
         console.warn('No se pudo guardar decisión en backend:', err);
-        saveSucceeded = false;
         // Show warning but continue with PDF generation
         setApiError(
           'Advertencia: El informe se guardará localmente pero no se pudo registrar en el servidor. ' +
@@ -2177,21 +2248,32 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
         );
       }
 
-      const blob = await downloadInformePdf(informeId);
-      const url = URL.createObjectURL(blob);
-      setPdfUrl(url);
       setHistory(prev => dedupeHistoryEntriesByInformeId([{
         informeId, fecha: formatDate(new Date()), patient: { ...patient },
-        sections: [...sections], pdfUrl: url, qrDataUrl, notaClinica,
+        sections: [...sections], pdfUrl: '', qrDataUrl, notaClinica,
       }, ...prev]));
       setState('guardado');
+
+      try {
+        const preview = await getInformePdfPreview(informeId);
+        setPdfUrl(preview.objectUrl);
+      } catch (previewErr) {
+        if (previewErr instanceof ImagiaxApiError && previewErr.status === 401) {
+          setAuthUser(null);
+          return;
+        }
+        setPdfError(
+          'El informe quedó guardado, pero todavía no pudimos cargar la vista previa del PDF final de backend. '
+          + 'Podés reintentar, abrirlo o descargarlo.'
+        );
+      }
     } catch (err) {
-      setPdfError('Error al generar el PDF. Intente nuevamente.');
+      setPdfError('No se pudo confirmar o generar el PDF final. Intente nuevamente.');
       console.error(err);
     } finally {
       setIsGeneratingPdf(false);
     }
-  }, [informeId, patient, sections, qrDataUrl, editingReport, editSections]);
+  }, [informeId, patient, sections, qrDataUrl, editingReport, editSections, notaClinica, clearPdfUrlSafely]);
 
   const handleEditar = useCallback(() => {
     setEditSections(sections.map(s => ({ ...s, lines: [...s.lines] })));
@@ -2201,8 +2283,8 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
   const handleGuardarEdicion = useCallback(() => {
     setSections(editSections);
     setEditingReport(false);
-    setPdfUrl('');
-  }, [editSections]);
+    clearPdfUrlSafely();
+  }, [clearPdfUrlSafely, editSections]);
 
   const handleDownloadHistoryPdf = useCallback(async (entry: HistoryEntry) => {
     setHistoryPdfError('');
@@ -2272,16 +2354,16 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       }
     }
     setState('rechazado');
-    setPdfUrl('');
+    clearPdfUrlSafely();
     setPdfError('');
-  }, [informeId]);
+  }, [clearPdfUrlSafely, informeId]);
 
   // FIX: reset completo de todos los estados incluyendo editSections y viewingEntry
   const handleReset = useCallback(() => {
     setState('idle');
     setSections([]);
     setEditSections([]);
-    setPdfUrl('');
+    clearPdfUrlSafely();
     setPdfError('');
     setPdfConfirmed(false);
     setLegalAccepted(false);
@@ -2297,7 +2379,13 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
     setV2Loading(false);
     setViewingEntry(null);
     clearActiveAnalysis();
-  }, [clearActiveAnalysis]);
+  }, [clearActiveAnalysis, clearPdfUrlSafely]);
+
+  useEffect(() => {
+    return () => {
+      if (pdfUrl) revokeInformePdfPreviewUrl(pdfUrl);
+    };
+  }, [pdfUrl]);
 
   // ── Renders ────────────────────────────────────────────────────────────────
   // PERF-H4: memoize payment/credit derived values — these are used in multiple
@@ -2676,17 +2764,59 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       </div>
 
       <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:'10px' }}>
-        <ScaledPreview sec={sections} pid={informeId} qr={qrDataUrl} pat={patient} nota={notaClinica} containerWidth={panelWidth} />
-        {pdfError && <div style={{ color:'#f87171', fontSize:'11px', background:'#450a0a', borderRadius:'4px', padding:'8px 10px' }}>{pdfError}</div>}
         {!pdfUrl ? (
-          <button onClick={handleGeneratePdf} disabled={isGeneratingPdf}
-            style={{ background: isGeneratingPdf ? '#1e293b' : 'linear-gradient(135deg,#1e40af,#3b82f6)',
-              color:'white', border:'none', borderRadius:'6px', padding:'12px', fontSize:'13px', fontWeight:'700',
-              cursor: isGeneratingPdf ? 'not-allowed' : 'pointer',
-              display:'flex', alignItems:'center', justifyContent:'center', gap:'8px' }}>
-            {isGeneratingPdf ? (<><Spinner />Generando PDF final...</>) : 'Generar y descargar PDF final (backend)'}
-          </button>
+          <div style={{ background:'#0d1420', border:'1px solid #1e3a5f', borderRadius:'8px', padding:'12px' }}>
+            <div style={{ color:'#93c5fd', fontSize:'11px', fontWeight:'700' }}>
+              {isGeneratingPdf ? 'Cargando PDF final backend...' : 'PDF final backend pendiente de previsualización'}
+            </div>
+            <div style={{ color:'#64748b', fontSize:'10px', marginTop:'6px', lineHeight:'1.5' }}>
+              El borrador HTML local ya no es autoritativo. Cargá el PDF final de backend para validar el documento oficial.
+            </div>
+            {pdfError && (
+              <div style={{ color:'#fca5a5', fontSize:'10px', marginTop:'8px', lineHeight:'1.5', background:'#1a0a0a', border:'1px solid #7f1d1d', borderRadius:'6px', padding:'8px 10px' }}>
+                {pdfError}
+              </div>
+            )}
+            <div style={{ marginTop:'10px', display:'flex', gap:'8px', flexWrap:'wrap' }}>
+              <button onClick={handleGeneratePdf} disabled={isGeneratingPdf}
+                style={{ background: isGeneratingPdf ? '#1e293b' : 'linear-gradient(135deg,#1e40af,#3b82f6)',
+                  color:'white', border:'none', borderRadius:'6px', padding:'10px 12px', fontSize:'11px', fontWeight:'700',
+                  cursor: isGeneratingPdf ? 'not-allowed' : 'pointer',
+                  display:'flex', alignItems:'center', justifyContent:'center', gap:'6px' }}>
+                {isGeneratingPdf ? (<><Spinner />Cargando PDF final...</>) : 'Reintentar PDF final backend'}
+              </button>
+              <button
+                onClick={() => window.open(`${IMAGIAX_BACKEND}/informes/${encodeURIComponent(informeId)}/pdf`, '_blank', 'noopener,noreferrer')}
+                style={{ background:'transparent', color:'#93c5fd', border:'1px solid #1e3a5f', borderRadius:'6px', padding:'10px 12px', fontSize:'11px', cursor:'pointer' }}
+              >
+                Abrir PDF backend
+              </button>
+              <button
+                onClick={handleDownloadFinalBackendPdf}
+                style={{ background:'transparent', color:'#93c5fd', border:'1px solid #1e3a5f', borderRadius:'6px', padding:'10px 12px', fontSize:'11px', cursor:'pointer' }}
+              >
+                Descargar PDF backend
+              </button>
+            </div>
+          </div>
         ) : (
+          <div style={{ width:'100%', minHeight:'70vh', border:'1px solid #1e293b', borderRadius:'8px', background:'#fff', position:'relative' }}>
+            <object
+              aria-label={`PDF final ${informeId}`}
+              data={pdfUrl}
+              type="application/pdf"
+              style={{ width:'100%', height:'100%', minHeight:'70vh', border:'none', borderRadius:'8px', background:'#fff' }}
+            >
+              <iframe
+                title={`PDF final ${informeId}`}
+                src={pdfUrl}
+                style={{ width:'100%', height:'100%', minHeight:'70vh', border:'none', borderRadius:'8px', background:'#fff' }}
+              />
+            </object>
+          </div>
+        )}
+        {pdfError && <div style={{ color:'#f87171', fontSize:'11px', background:'#450a0a', borderRadius:'4px', padding:'8px 10px' }}>{pdfError}</div>}
+        {pdfUrl && (
           <a href={pdfUrl} download={`${informeId}.pdf`}
             style={{ background:'linear-gradient(135deg,#166534,#16a34a)', color:'#86efac', borderRadius:'6px',
               padding:'12px', fontSize:'13px', fontWeight:'700', textDecoration:'none',
@@ -2749,7 +2879,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
         <button
           onClick={() => {
             setHistoryPdfError('');
-            fetchHistorialFromBackend();
+            fetchHistorialFromBackend(false);
           }}
           disabled={historialLoading}
           title="Actualizar historial"

@@ -1,6 +1,6 @@
 param(
-  [string]$ExpectedPanelSha256 = '03137604ffd7eaf990da2af5dc0dd458518a75774ec4d2feeb564d15b4fd8e8c',
-  [string]$ExpectedApiSha256 = 'ff94bd0eba528b3dd0f7723304a70fb82e20b234a8634cb6cff4e4f0c89ffa08'
+  [string]$ExpectedPanelSha256 = '05ce1980fa25ac648e84c2daf96b3661be1101f78b47c90412e31ed4622827bd',
+  [string]$ExpectedApiSha256 = 'a1f5edade9683d4a0480fdb938d3a9e06e0a7515abd08719bf98c91f4aab27ef'
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +27,11 @@ $requiredTokens = @(
   'Actualizar historial',
   $tokenCargarMasInformes,
   'downloadInformePdf',
+  'getInformePdfPreview',
+  'revokeInformePdfPreviewUrl',
+  'Reintentar PDF final backend',
+  'Abrir PDF backend',
+  'Descargar PDF backend',
   'isGenerarInformeAcceptedResponse',
   'getEstadoGeneracionInforme',
   'pollAnalysisJob'

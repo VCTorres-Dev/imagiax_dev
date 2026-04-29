@@ -462,6 +462,26 @@ export async function downloadInformePdf(informeId: string): Promise<Blob> {
   }
 }
 
+export interface InformePdfPreview {
+  blob: Blob;
+  objectUrl: string;
+}
+
+/**
+ * Fetches authoritative backend-final PDF and returns both Blob + object URL
+ * for embedded preview scenarios.
+ */
+export async function getInformePdfPreview(informeId: string): Promise<InformePdfPreview> {
+  const blob = await downloadInformePdf(informeId);
+  const objectUrl = URL.createObjectURL(blob);
+  return { blob, objectUrl };
+}
+
+export function revokeInformePdfPreviewUrl(objectUrl: string): void {
+  if (!objectUrl) return;
+  URL.revokeObjectURL(objectUrl);
+}
+
 // ══ V2 Experimental — NV-Reason-CXR-3B ═══════════════════════════════════════
 
 export interface V2PatologiaInfo {
