@@ -192,6 +192,27 @@ export class ImagiaxTimeoutError extends Error {
   }
 }
 
+const PDF_CONTENT_TYPE = 'application/pdf';
+
+function validatePdfBlob(response: Response, blob: Blob, endpoint: string): Blob {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  const hasDeclaredPdfType = contentType.includes(PDF_CONTENT_TYPE);
+
+  if (contentType && !hasDeclaredPdfType) {
+    throw new ImagiaxApiError(502, `Respuesta inválida desde ${endpoint}: se esperaba PDF.`);
+  }
+
+  if (!blob || blob.size <= 0) {
+    throw new ImagiaxApiError(502, `Respuesta inválida desde ${endpoint}: PDF vacío.`);
+  }
+
+  if (!blob.type || blob.type.toLowerCase() !== PDF_CONTENT_TYPE) {
+    return new Blob([blob], { type: PDF_CONTENT_TYPE });
+  }
+
+  return blob;
+}
+
 export function isGenerarInformeAcceptedResponse(
   response: GenerarInformeResult
 ): response is GenerarInformeAcceptedResponse {
@@ -403,7 +424,8 @@ export async function listadoInformes(
  * @param informeId - UUID of the report
  */
 export async function downloadInformePdf(informeId: string): Promise<Blob> {
-  const url = `${API_BASE_URL}/informes/${encodeURIComponent(informeId)}/pdf`;
+  const endpoint = `/informes/${encodeURIComponent(informeId)}/pdf`;
+  const url = `${API_BASE_URL}${endpoint}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.DEFAULT);
 
@@ -427,7 +449,8 @@ export async function downloadInformePdf(informeId: string): Promise<Blob> {
       throw new ImagiaxApiError(response.status, detail);
     }
 
-    return response.blob();
+    const blob = await response.blob();
+    return validatePdfBlob(response, blob, endpoint);
   } catch (error) {
     if (error instanceof ImagiaxApiError) throw error;
     if (error instanceof Error && error.name === 'AbortError') {

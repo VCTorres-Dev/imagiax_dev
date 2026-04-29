@@ -1211,6 +1211,9 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
   const [pdfObjectUrl, setPdfObjectUrl] = useState('');
   const [pdfLoading, setPdfLoading] = useState(true);
   const [pdfError, setPdfError] = useState('');
+  const [viewerReady, setViewerReady] = useState(false);
+  const [viewerTimedOut, setViewerTimedOut] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // Close on Escape key only.
   useEffect(() => {
@@ -1235,6 +1238,7 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
     const loadPdf = async () => {
       setPdfLoading(true);
       setPdfError('');
+      setPdfObjectUrl('');
       if (!entryHasPdf) {
         const errorMessage = 'Este informe del historial no tiene un identificador válido para abrir su PDF.';
         setPdfLoading(false);
@@ -1255,6 +1259,7 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
         if (err instanceof ImagiaxApiError) {
           errorMessage = `No se pudo abrir el PDF (${err.status}).`;
         }
+        setPdfObjectUrl('');
         setPdfError(errorMessage);
         onHistoryPdfError(errorMessage);
       } finally {
@@ -1268,12 +1273,55 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [entry, entryHasPdf]);
+  }, [entry, entryHasPdf, onHistoryPdfError, reloadNonce]);
+
+  const handleOpenBackendPdfDirect = useCallback(() => {
+    if (!entryHasPdf) {
+      const errorMessage = 'No se puede abrir: falta el identificador del informe histórico.';
+      setPdfError(errorMessage);
+      onHistoryPdfError(errorMessage);
+      return;
+    }
+    const reportId = getHistoryInformeId(entry);
+    const backendPdfUrl = `${IMAGIAX_BACKEND}/informes/${encodeURIComponent(reportId)}/pdf`;
+    window.open(backendPdfUrl, '_blank', 'noopener,noreferrer');
+  }, [entry, entryHasPdf, onHistoryPdfError]);
+
+  useEffect(() => {
+    if (pdfLoading || pdfError || !pdfObjectUrl) {
+      setViewerReady(false);
+      setViewerTimedOut(false);
+      return;
+    }
+
+    setViewerReady(false);
+    setViewerTimedOut(false);
+    const timer = window.setTimeout(() => {
+      setViewerTimedOut(true);
+    }, 5000);
+
+    return () => window.clearTimeout(timer);
+  }, [pdfLoading, pdfError, pdfObjectUrl]);
 
   const handleOpenPdf = useCallback(() => {
-    if (!pdfObjectUrl) return;
-    window.open(pdfObjectUrl, '_blank', 'noopener,noreferrer');
-  }, [pdfObjectUrl]);
+    if (pdfObjectUrl) {
+      window.open(pdfObjectUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    handleOpenBackendPdfDirect();
+  }, [handleOpenBackendPdfDirect, pdfObjectUrl]);
+
+  const handleRetryLoadPdf = useCallback(() => {
+    setPdfError('');
+    setViewerReady(false);
+    setViewerTimedOut(false);
+    setReloadNonce(prev => prev + 1);
+  }, []);
+
+  const handleViewerLoad = useCallback(() => {
+    setViewerReady(true);
+    setViewerTimedOut(false);
+  }, []);
 
   const handleDownloadCurrentPdf = useCallback(() => {
     if (!entryHasPdf) {
@@ -1383,17 +1431,108 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
             <div style={{ width: '100%', maxWidth: '720px', background:'#111827', border:'1px solid #7f1d1d', borderRadius:'10px', padding:'18px', color:'#fca5a5', fontSize:'12px', lineHeight:'1.6' }}>
               {pdfError}
               <div style={{ marginTop:'10px', color:'#94a3b8' }}>
-                Podés descargar el PDF directamente para revisarlo fuera del visor.
+                Podés usar “Abrir PDF” o “Descargar PDF” para revisar el PDF final del backend.
+              </div>
+              <div style={{ marginTop:'12px', display:'flex', gap:'8px', flexWrap:'wrap' }}>
+                <button
+                  onClick={handleRetryLoadPdf}
+                  style={{
+                    background:'transparent', color:'#93c5fd', border:'1px solid #1e3a5f',
+                    borderRadius:'6px', padding:'7px 12px', fontSize:'11px', cursor:'pointer',
+                  }}
+                >
+                  Reintentar carga
+                </button>
+                {entryHasPdf && (
+                  <button
+                    onClick={handleOpenPdf}
+                    style={{
+                      background:'transparent', color:'#93c5fd', border:'1px solid #1e3a5f',
+                      borderRadius:'6px', padding:'7px 12px', fontSize:'11px', cursor:'pointer',
+                    }}
+                  >
+                    Abrir PDF
+                  </button>
+                )}
+                {entryHasPdf && (
+                  <button
+                    onClick={handleDownloadCurrentPdf}
+                    style={{
+                      background:'linear-gradient(135deg,#1e40af,#3b82f6)', color:'white',
+                      border:'none', borderRadius:'6px', padding:'7px 12px', fontSize:'11px',
+                      fontWeight:'700', cursor:'pointer',
+                    }}
+                  >
+                    Descargar PDF
+                  </button>
+                )}
               </div>
             </div>
           )}
 
           {!pdfLoading && !pdfError && pdfObjectUrl && (
-            <iframe
-              title={`PDF ${entry.informeId}`}
-              src={pdfObjectUrl}
-              style={{ width:'100%', height:'100%', minHeight:'70vh', border:'1px solid #1e293b', borderRadius:'8px', background:'#fff' }}
-            />
+            <div style={{ width:'100%', minHeight:'70vh', border:'1px solid #1e293b', borderRadius:'8px', background:'#fff', position:'relative' }}>
+              {!viewerReady && !viewerTimedOut && (
+                <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(255,255,255,0.92)', color:'#1e3a5f', fontSize:'12px', fontWeight:'600', zIndex:2 }}>
+                  Cargando visor PDF...
+                </div>
+              )}
+
+              {viewerTimedOut && !viewerReady && (
+                <div style={{ position:'absolute', inset:'18px', border:'1px solid #f59e0b', borderRadius:'8px', background:'#fff7ed', color:'#92400e', fontSize:'12px', padding:'14px', lineHeight:'1.6', zIndex:3 }}>
+                  No se pudo renderizar la previsualización embebida en este navegador.
+                  <div style={{ marginTop:'8px' }}>Usá “Abrir PDF” o “Descargar PDF” para evitar pantalla en blanco.</div>
+                  <div style={{ marginTop:'10px', display:'flex', gap:'8px', flexWrap:'wrap' }}>
+                    <button
+                      onClick={handleRetryLoadPdf}
+                      style={{
+                        background:'transparent', color:'#92400e', border:'1px solid #f59e0b',
+                        borderRadius:'6px', padding:'6px 10px', fontSize:'11px', cursor:'pointer',
+                      }}
+                    >
+                      Reintentar visor
+                    </button>
+                    {entryHasPdf && (
+                      <button
+                        onClick={handleOpenPdf}
+                        style={{
+                          background:'transparent', color:'#92400e', border:'1px solid #f59e0b',
+                          borderRadius:'6px', padding:'6px 10px', fontSize:'11px', cursor:'pointer',
+                        }}
+                      >
+                        Abrir PDF
+                      </button>
+                    )}
+                    {entryHasPdf && (
+                      <button
+                        onClick={handleDownloadCurrentPdf}
+                        style={{
+                          background:'#d97706', color:'white', border:'none', borderRadius:'6px',
+                          padding:'6px 10px', fontSize:'11px', fontWeight:'700', cursor:'pointer',
+                        }}
+                      >
+                        Descargar PDF
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <object
+                aria-label={`PDF ${entry.informeId}`}
+                data={pdfObjectUrl}
+                type="application/pdf"
+                onLoad={handleViewerLoad}
+                style={{ width:'100%', height:'100%', minHeight:'70vh', border:'none', borderRadius:'8px', background:'#fff' }}
+              >
+                <iframe
+                  title={`PDF ${entry.informeId}`}
+                  src={pdfObjectUrl}
+                  onLoad={handleViewerLoad}
+                  style={{ width:'100%', height:'100%', minHeight:'70vh', border:'none', borderRadius:'8px', background:'#fff' }}
+                />
+              </object>
+            </div>
           )}
         </div>
 
@@ -1406,10 +1545,10 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
           flexShrink: 0,
         }}>
         <div style={{ color: '#334155', fontSize: '9px' }}>
-            Estás viendo el mismo PDF final que se descarga desde IMAGIAX.
+            Estás viendo el PDF final de backend (no un HTML local).
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            {pdfObjectUrl && (
+            {entryHasPdf && (
               <button
                 onClick={handleOpenPdf}
                 style={{
@@ -2490,7 +2629,10 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
           </div>
         </details>
 
-        {/* Vista Previa del Informe Final */}
+        {/* Vista previa rápida (HTML local) */}
+        <div style={{ background:'#0d1420', border:'1px solid #1e3a5f', borderRadius:'8px', padding:'8px 10px', color:'#93c5fd', fontSize:'10px', fontWeight:'700', letterSpacing:'0.2px' }}>
+          Borrador / vista rápida (HTML local). El documento oficial es el PDF final generado por backend IMAGIAX.
+        </div>
         <ScaledPreview sec={sections} pid={informeId} qr={qrDataUrl} pat={patient} nota={notaClinica} containerWidth={panelWidth} />
 
         {/* Botones de Acción */}
@@ -2542,14 +2684,14 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
               color:'white', border:'none', borderRadius:'6px', padding:'12px', fontSize:'13px', fontWeight:'700',
               cursor: isGeneratingPdf ? 'not-allowed' : 'pointer',
               display:'flex', alignItems:'center', justifyContent:'center', gap:'8px' }}>
-            {isGeneratingPdf ? (<><Spinner />Generando PDF...</>) : 'Generar y descargar PDF'}
+            {isGeneratingPdf ? (<><Spinner />Generando PDF final...</>) : 'Generar y descargar PDF final (backend)'}
           </button>
         ) : (
           <a href={pdfUrl} download={`${informeId}.pdf`}
             style={{ background:'linear-gradient(135deg,#166534,#16a34a)', color:'#86efac', borderRadius:'6px',
               padding:'12px', fontSize:'13px', fontWeight:'700', textDecoration:'none',
               display:'flex', alignItems:'center', justifyContent:'center', gap:'8px' }}>
-            Descargar PDF
+            Descargar PDF final (backend)
           </a>
         )}
         <button onClick={handleReset}

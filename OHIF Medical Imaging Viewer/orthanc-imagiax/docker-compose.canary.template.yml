@@ -1,0 +1,47 @@
+version: "3.9"
+
+# IMAGIAX OHIF Canary template (LOCAL/SAFE)
+# ------------------------------------------------------------
+# - Solo bind local: 127.0.0.1:18080
+# - Sin nginx, sin cutover productivo, sin secretos
+# - Mantiene contrato APP_CONFIG parity: /api y /pacs/*
+#
+# Uso sugerido (manual, fuera de este cambio):
+#   set IMAGIAX_CANARY_TAG=canary-YYYYMMDD
+#   docker compose -f "OHIF Medical Imaging Viewer/orthanc-imagiax/docker-compose.canary.template.yml" up -d
+#
+services:
+  ohif_canary:
+    image: "imagiax/ohif:${IMAGIAX_CANARY_TAG:-canary-latest}"
+    container_name: ohif-imagiax-canary
+    ports:
+      - "127.0.0.1:18080:80"
+    restart: unless-stopped
+    environment:
+      APP_CONFIG: |
+        window.config = {
+          routerBasename: null,
+          showStudyList: true,
+          extensions: [],
+          modes: [],
+          defaultDataSourceName: 'orthancProxy',
+          dataSources: [{
+            namespace: '@ohif/extension-default.dataSourcesModule.dicomweb',
+            sourceName: 'orthancProxy',
+            configuration: {
+              friendlyName: 'IMAGIAX PACS',
+              name: 'Orthanc',
+              wadoUriRoot: '/pacs/wado',
+              qidoRoot: '/pacs/dicom-web',
+              wadoRoot: '/pacs/dicom-web',
+              qidoSupportsIncludeField: false,
+              imageRendering: 'wadors',
+              thumbnailRendering: 'wadors',
+              dicomUploadEnabled: true,
+              omitQuotationForMultipartRequest: true,
+            },
+          }],
+        };
+        window.__IMAGIAX_API_URL__ = '/api';
+        window.__IMAGIAX_V2_API_URL__ = '/api';
+        window.__IMAGIAX_CONFIG__ = { backend_url: '/api' };
