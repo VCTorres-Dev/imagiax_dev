@@ -94,3 +94,56 @@ Esta rama debe decidir una sola autoridad:
 - alternativa: volver explícitamente al monolito, pero solo con rollback y validación.
 
 Mientras esa decisión no esté cerrada, el deploy backend debe quedar bloqueado.
+
+## Baseline post-cutover OHIF (2026-04-29)
+
+Fecha de captura: 2026-04-29 (post-cutover validado).
+
+### Baseline backend (sin cambios)
+
+- Contenedor: `fastapi-imagiax`
+- Imagen runtime (tag): `imagiax-backend:rollback-precutover-3da43fd`
+- Image ID: `sha256:f84e80020e81cd80c2deb56c2bf76012df38e78a02ab7f091e5c677575e50df1`
+
+### Baseline frontend OHIF (normalizado)
+
+- Contenedor: `ohif-imagiax`
+- Imagen runtime (tag): `orthanc-imagiax-ohif:prod-18d45af`
+- Image ID: `sha256:6d22a20e0b275f9bf66be723b92a0b5160082000b6a53a22b1b150361df2cae4`
+
+Producción **ya no** está corriendo una imagen con naming de canary. El baseline vigente queda normalizado a:
+
+```text
+orthanc-imagiax-ohif:prod-18d45af
+```
+
+### Rollback OHIF disponible
+
+- `orthanc-imagiax-ohif:rollback-precanonical-canary-e186bec`
+- `orthanc-imagiax-ohif:rollback-precutover-3da43fd`
+- Ambas tags apuntan al mismo image ID: `sha256:534205c182f9787e9f5f686379b1e5c43cfd5aff165f454e5240c48251a12ba0`
+
+### Compose override remoto activo
+
+Ruta:
+
+```text
+/root/imagiax/OHIF Medical Imaging Viewer/orthanc-imagiax/docker-compose.ohif-canary-cutover.override.yml
+```
+
+Estado esperado/validado en esa ruta:
+
+```text
+orthanc-imagiax-ohif:prod-18d45af
+```
+
+### Checks públicos post-cutover
+
+- `GET /api/salud` → `200`
+- `GET /` → `302`
+- `GET /api/config/frontend` sin auth → `401`
+
+### Issues menores conocidos (no bloqueantes)
+
+- Historial: label `Ver`
+- Dashboard: detalles menores pendientes
