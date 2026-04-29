@@ -154,6 +154,37 @@ interface HistoryEntry {
   notaClinica?: string;
 }
 
+function getHistoryInformeId(entry: Pick<HistoryEntry, 'informeId'>): string {
+  return String(entry.informeId || '').trim();
+}
+
+function canOpenHistoryEntry(entry: Pick<HistoryEntry, 'informeId'>): boolean {
+  return getHistoryInformeId(entry).length > 0;
+}
+
+function hasHistoryPdf(entry: Pick<HistoryEntry, 'informeId'>): boolean {
+  return canOpenHistoryEntry(entry);
+}
+
+function dedupeHistoryEntriesByInformeId(entries: HistoryEntry[]): HistoryEntry[] {
+  const seenInformeIds = new Set<string>();
+  const deduped: HistoryEntry[] = [];
+
+  for (const entry of entries) {
+    const normalizedInformeId = getHistoryInformeId(entry);
+    if (normalizedInformeId) {
+      if (seenInformeIds.has(normalizedInformeId)) continue;
+      seenInformeIds.add(normalizedInformeId);
+      deduped.push({ ...entry, informeId: normalizedInformeId });
+      continue;
+    }
+
+    deduped.push(entry);
+  }
+
+  return deduped;
+}
+
 // Caché en memoria para evitar regenerar/descargar el mismo PDF varias veces
 // durante la sesión activa del visor. Se mantiene pequeño para no crecer sin control.
 const PDF_BLOB_CACHE = new Map<string, Blob>();
@@ -1147,7 +1178,7 @@ const HistoryCard = memo(({ entry, onView, onDownloadPdf }: { entry: HistoryEntr
       </div>
     </div>
     <div style={{ display:'flex', gap:'6px', flexShrink:0 }}>
-      {entry.sections?.length > 0 && (
+      {hasHistoryPdf(entry) && (
         <button onClick={onDownloadPdf}
           style={{ background:'#1e3a5f', color:'#93c5fd', border:'none', borderRadius:'5px',
             padding:'6px 10px', fontSize:'11px', cursor:'pointer',
@@ -1156,8 +1187,10 @@ const HistoryCard = memo(({ entry, onView, onDownloadPdf }: { entry: HistoryEntr
         </button>
       )}
       <button onClick={onView}
+        disabled={!canOpenHistoryEntry(entry)}
         style={{ background:'#1d4ed8', color:'white', border:'none', borderRadius:'5px',
-          padding:'6px 10px', fontSize:'11px', cursor:'pointer', fontWeight:'600' }}>
+          padding:'6px 10px', fontSize:'11px', cursor: canOpenHistoryEntry(entry) ? 'pointer' : 'not-allowed',
+          fontWeight:'600', opacity: canOpenHistoryEntry(entry) ? 1 : 0.45 }}>
         Ver
       </button>
     </div>
@@ -1169,10 +1202,12 @@ interface ReportViewerModalProps {
   entry: HistoryEntry;
   onClose: () => void;
   onDownloadPdf: () => void;
+  onHistoryPdfError: (message: string) => void;
 }
 
-const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, onDownloadPdf }) => {
+const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, onDownloadPdf, onHistoryPdfError }) => {
   const displayName = sanitizePatientDisplayName(entry.patient.nombre);
+  const entryHasPdf = hasHistoryPdf(entry);
   const [pdfObjectUrl, setPdfObjectUrl] = useState('');
   const [pdfLoading, setPdfLoading] = useState(true);
   const [pdfError, setPdfError] = useState('');
@@ -1200,19 +1235,28 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
     const loadPdf = async () => {
       setPdfLoading(true);
       setPdfError('');
+      if (!entryHasPdf) {
+        const errorMessage = 'Este informe del historial no tiene un identificador válido para abrir su PDF.';
+        setPdfLoading(false);
+        setPdfError(errorMessage);
+        onHistoryPdfError(errorMessage);
+        return;
+      }
       try {
-        const blob = getCachedPdfBlob(entry.informeId) || await downloadInformePdf(entry.informeId);
+        const reportId = getHistoryInformeId(entry);
+        const blob = getCachedPdfBlob(reportId) || await downloadInformePdf(reportId);
         if (!active) return;
-        cachePdfBlob(entry.informeId, blob);
+        cachePdfBlob(reportId, blob);
         objectUrl = URL.createObjectURL(blob);
         setPdfObjectUrl(objectUrl);
       } catch (err) {
         if (!active) return;
+        let errorMessage = 'No se pudo cargar la vista previa del PDF.';
         if (err instanceof ImagiaxApiError) {
-          setPdfError(`No se pudo abrir el PDF (${err.status}).`);
-        } else {
-          setPdfError('No se pudo cargar la vista previa del PDF.');
+          errorMessage = `No se pudo abrir el PDF (${err.status}).`;
         }
+        setPdfError(errorMessage);
+        onHistoryPdfError(errorMessage);
       } finally {
         if (active) setPdfLoading(false);
       }
@@ -1224,7 +1268,7 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [entry.informeId]);
+  }, [entry, entryHasPdf]);
 
   const handleOpenPdf = useCallback(() => {
     if (!pdfObjectUrl) return;
@@ -1232,6 +1276,12 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
   }, [pdfObjectUrl]);
 
   const handleDownloadCurrentPdf = useCallback(() => {
+    if (!entryHasPdf) {
+      const errorMessage = 'No se puede descargar: falta el identificador del informe histórico.';
+      setPdfError(errorMessage);
+      onHistoryPdfError(errorMessage);
+      return;
+    }
     if (!pdfObjectUrl) {
       onDownloadPdf();
       return;
@@ -1242,7 +1292,7 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-  }, [entry.informeId, onDownloadPdf, pdfObjectUrl]);
+  }, [entry.informeId, entryHasPdf, onDownloadPdf, onHistoryPdfError, pdfObjectUrl]);
 
   return (
     <div
@@ -1381,7 +1431,7 @@ const ReportViewerModal: React.FC<ReportViewerModalProps> = ({ entry, onClose, o
             >
               Cerrar
             </button>
-            {entry.sections?.length > 0 && (
+            {entryHasPdf && (
               <button
                 onClick={handleDownloadCurrentPdf}
                 style={{
@@ -1517,7 +1567,9 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       const raw = sessionStorage.getItem('imagiax_history_v1');
       if (raw) {
         const parsed = JSON.parse(raw) as HistoryEntry[];
-        return parsed.map(e => ({ ...e, pdfUrl: '', patient: { ...e.patient, nombre: sanitizePatientDisplayName(e.patient?.nombre) } }));
+        return dedupeHistoryEntriesByInformeId(
+          parsed.map(e => ({ ...e, pdfUrl: '', patient: { ...e.patient, nombre: sanitizePatientDisplayName(e.patient?.nombre) } }))
+        );
       }
     } catch { /* ignorar error de parse */ }
     return [];
@@ -1525,6 +1577,7 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
   const [viewingEntry,    setViewingEntry]    = useState<HistoryEntry | null>(null);
   const [historialLoading, setHistorialLoading] = useState(false);
   const [historialError,   setHistorialError]   = useState('');
+  const [historyPdfError,  setHistoryPdfError]  = useState('');
   const [historyHasMore,   setHistoryHasMore]   = useState(false);
   const [historyNextCursor,setHistoryNextCursor]= useState<string | null>(null);
   const [historyTotal,     setHistoryTotal]     = useState(0);
@@ -1550,14 +1603,19 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
    */
   const fetchHistorialFromBackend = useCallback(async (append = false) => {
     setHistorialLoading(true);
+    setHistoryPdfError('');
     if (!append) setHistorialError('');
     try {
       const data = await listadoInformes(undefined, HISTORY_PAGE_SIZE, append ? (historyCursorRef.current || undefined) : undefined);
       const entries = (data.items || []).map(informeDbToHistoryEntry);
-      setHistory(prev => append ? [...prev, ...entries] : entries);
+      let mergedEntries: HistoryEntry[] = [];
+      setHistory(prev => {
+        mergedEntries = dedupeHistoryEntriesByInformeId(append ? [...prev, ...entries] : entries);
+        return mergedEntries;
+      });
       setHistoryHasMore(Boolean(data.has_more));
       setHistoryNextCursor(data.next_cursor || null);
-      if (!append) setHistoryTotal(data.total || entries.length);
+      setHistoryTotal(Math.max(data.total || 0, mergedEntries.length));
     } catch (err) {
       if (err instanceof ImagiaxApiError && err.status === 401) {
         setAuthUser(null);
@@ -1983,10 +2041,10 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       const blob = await downloadInformePdf(informeId);
       const url = URL.createObjectURL(blob);
       setPdfUrl(url);
-      setHistory(prev => [{
+      setHistory(prev => dedupeHistoryEntriesByInformeId([{
         informeId, fecha: formatDate(new Date()), patient: { ...patient },
         sections: [...sections], pdfUrl: url, qrDataUrl, notaClinica,
-      }, ...prev]);
+      }, ...prev]));
       setState('guardado');
     } catch (err) {
       setPdfError('Error al generar el PDF. Intente nuevamente.');
@@ -2008,18 +2066,25 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
   }, [editSections]);
 
   const handleDownloadHistoryPdf = useCallback(async (entry: HistoryEntry) => {
+    setHistoryPdfError('');
+    const reportId = getHistoryInformeId(entry);
+    if (!reportId) {
+      setHistoryPdfError('Este informe histórico no tiene identificador válido para descargar PDF.');
+      return;
+    }
     try {
-      const blob = getCachedPdfBlob(entry.informeId) || await downloadInformePdf(entry.informeId);
-      cachePdfBlob(entry.informeId, blob);
+      const blob = getCachedPdfBlob(reportId) || await downloadInformePdf(reportId);
+      cachePdfBlob(reportId, blob);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${entry.informeId}.pdf`;
+      a.download = `${reportId}.pdf`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err) {
+      setHistoryPdfError('No se pudo descargar el PDF del historial. Reintentá en unos segundos.');
       console.error('Error descargando PDF del historial:', err);
     }
   }, []);
@@ -2521,8 +2586,12 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       {viewingEntry && (
         <ReportViewerModal
           entry={viewingEntry}
-          onClose={() => setViewingEntry(null)}
+          onClose={() => {
+            setViewingEntry(null);
+            setHistoryPdfError('');
+          }}
           onDownloadPdf={() => handleDownloadHistoryPdf(viewingEntry)}
+          onHistoryPdfError={setHistoryPdfError}
         />
       )}
 
@@ -2536,7 +2605,10 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
               : `${history.length} informe${history.length !== 1 ? 's' : ''} registrado${history.length !== 1 ? 's' : ''}`}
         </div>
         <button
-          onClick={fetchHistorialFromBackend}
+          onClick={() => {
+            setHistoryPdfError('');
+            fetchHistorialFromBackend();
+          }}
           disabled={historialLoading}
           title="Actualizar historial"
           style={{ background:'transparent', border:'1px solid #1e3a5f', borderRadius:'5px',
@@ -2556,6 +2628,13 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
         <div style={{ background:'#1a0a0a', border:'1px solid #7f1d1d', borderRadius:'6px',
           padding:'10px 12px', color:'#fca5a5', fontSize:'11px' }}>
           {historialError}
+        </div>
+      )}
+
+      {historyPdfError && (
+        <div style={{ background:'#1a0a0a', border:'1px solid #7f1d1d', borderRadius:'6px',
+          padding:'10px 12px', color:'#fca5a5', fontSize:'11px' }}>
+          {historyPdfError}
         </div>
       )}
 
@@ -2581,11 +2660,26 @@ const ImagiaxAiPanel: React.FC<ImagiaxAiPanelProps> = () => {
       {history.length > 0 && (
         <>
           {history.map(e => (
-            <HistoryCard key={e.informeId} entry={e} onView={() => setViewingEntry(e)} onDownloadPdf={() => handleDownloadHistoryPdf(e)} />
+            <HistoryCard
+              key={e.informeId}
+              entry={e}
+              onView={() => {
+                if (!canOpenHistoryEntry(e)) {
+                  setHistoryPdfError('No se puede abrir este informe porque no tiene identificador válido.');
+                  return;
+                }
+                setHistoryPdfError('');
+                setViewingEntry(e);
+              }}
+              onDownloadPdf={() => handleDownloadHistoryPdf(e)}
+            />
           ))}
           {historyHasMore && (
             <button
-              onClick={() => fetchHistorialFromBackend(true)}
+              onClick={() => {
+                setHistoryPdfError('');
+                fetchHistorialFromBackend(true);
+              }}
               disabled={historialLoading}
               style={{ background:'transparent', color:'#93c5fd', border:'1px solid #1e3a5f', borderRadius:'8px', padding:'10px 12px', fontSize:'11px', fontWeight:'700', cursor: historialLoading ? 'default' : 'pointer' }}>
               {historialLoading ? 'Cargando más...' : 'Cargar más informes'}
