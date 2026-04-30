@@ -16,7 +16,7 @@ Usage (lifespan):
 
 Usage (dependency / service call):
     model = request.app.state.model
-    from app.ai.dicom_service import infer_multilabel
+    from infrastructure.dicom_service import infer_multilabel
     result = infer_multilabel(tensor, model)
 """
 

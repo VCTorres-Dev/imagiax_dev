@@ -18,8 +18,8 @@ from typing import Any
 
 from google import genai
 
-from app.ai.dicom_service import dicom_to_png_bytes
-from app.ai.llm_service import call_gemini_json
+from infrastructure.dicom_service import dicom_to_png_bytes
+from infrastructure.llm_service import call_gemini_json
 from app.ai.pipeline_context import QualityGateResult
 from app.ai.prompt_orchestrator import assemble_prompt, sanitize_dicom_text
 from app.core.config import settings
@@ -29,6 +29,17 @@ logger = logging.getLogger("imagiax.ai.quality_gate")
 # Model used for quality assessment — uses the project-wide Gemini model from settings
 # (was hardcoded "gemini-2.0-flash" — now respects .env GEMINI_MODEL)
 _QUALITY_GATE_MODEL: str = settings.GEMINI_MODEL
+
+# Strict system instruction — prevents JSON truncation on low max_output_tokens budgets.
+_QUALITY_GATE_SYSTEM_INSTRUCTION = (
+    "You are an expert radiologist evaluating image quality. "
+    "Respond ONLY with a single valid JSON object — no markdown fences, no extra text. "
+    "The JSON must contain exactly these keys: "
+    "verdict (string: 'adequate' | 'suboptimal' | 'not_analyzable'), "
+    "reason (string, max 200 chars), "
+    "confidence (float 0.0–1.0). "
+    "Do NOT truncate the JSON. Output the complete object."
+)
 
 # Fail-open result returned whenever the gate cannot complete
 _FAIL_OPEN_RESULT = QualityGateResult(
@@ -192,7 +203,9 @@ async def run_quality_gate(
             contents=contents,
             timeout=float(settings.QUALITY_GATE_TIMEOUT),
             temperature=0.0,
-            max_output_tokens=256,
+            max_output_tokens=512,
+            response_mime_type="application/json",
+            system_instruction=_QUALITY_GATE_SYSTEM_INSTRUCTION,
         )
         logger.debug("[QUALITY_GATE] Raw response: %.300s", raw_text)
     except asyncio.TimeoutError:
