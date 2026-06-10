@@ -87,7 +87,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         logger.warning("IMAGIAX Pagos: could not initialise payment tables.", exc_info=exc)
 
-    # 5) Pre-load Jinja2 prompt templates from YAML files
+    # 5) Branding config table (self-service /me/branding)
+    try:
+        from app.informes.db import create_branding_tables
+
+        await create_branding_tables(app.state.pool)
+        logger.info("IMAGIAX Branding: branding_config table ensured.")
+    except Exception as exc:
+        logger.warning("IMAGIAX Branding: could not initialise branding table.", exc_info=exc)
+
+    # 6) Pre-load Jinja2 prompt templates from YAML files
     try:
         from app.ai.prompt_orchestrator import load_templates
 
@@ -97,7 +106,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         logger.warning("IMAGIAX Prompts: could not pre-load prompt templates.", exc_info=exc)
 
-    # 6) Orthanc + PACS shared HTTP clients
+    # 7) Orthanc + PACS shared HTTP clients
     import httpx as _httpx
     _tbk_timeout = _httpx.Timeout(settings.IMAGIAX_HTTP_TIMEOUT)
     _orthanc_headers = {}
@@ -169,6 +178,11 @@ def create_app() -> FastAPI:
     from app.pagos.mp.router import router as mp_router
 
     app.include_router(mp_router, tags=["pagos-mp"])
+
+    # Self-service branding API (/me/branding CRUD)
+    from app.api.branding.router import router as branding_router
+
+    app.include_router(branding_router, tags=["branding"])
 
     # AI analysis & report generation (NO prefix -- nginx strips /api/ before proxy)
     from app.ai.router import router as ai_router

@@ -10,6 +10,10 @@ from app.informes.db import (
     get_todos_informes,
     get_study_by_short_id,
     generate_short_id,
+    create_branding_tables,
+    get_branding_for_user,
+    save_branding_config,
+    set_branding_active,
 )
 
 __all__ = [
@@ -22,4 +26,8 @@ __all__ = [
     "get_todos_informes",
     "get_study_by_short_id",
     "generate_short_id",
+    "create_branding_tables",
+    "get_branding_for_user",
+    "save_branding_config",
+    "set_branding_active",
 ]

@@ -31,7 +31,7 @@ from html import escape as html_escape
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.auth.dependencies import get_current_user, require_role
@@ -1311,4 +1311,45 @@ async def pagina_pago(
         "oneclick_form_display": "display:none" if oneclick_inscripcion else "",
         "api_base": settings.IMAGIAX_BASE_URL.rstrip("/"),
         "mp_public_key": settings.MP_PUBLIC_KEY,
+    })
+
+
+# ── Self-service Plantilla (branding) page ─────────────────────────────────────
+
+
+@router.get("/me/plantilla", response_class=HTMLResponse, include_in_schema=False)
+async def pagina_plantilla(request: Request) -> Response:
+    """Authenticated Plantilla page — self-service branding configuration.
+
+    Redirects to /login?returnTo=/me/plantilla for unauthenticated users.
+    Shows the current branding config and a form to edit it.
+    """
+    token = request.cookies.get("imagiax_session")
+    if not token:
+        return RedirectResponse(url="/login?returnTo=/me/plantilla", status_code=303)
+    try:
+        pool = request.app.state.pool
+        from app.auth.service import decode_token, is_jti_revoked, is_user_revoked
+        user = decode_token(token)
+        if user is None:
+            return RedirectResponse(url="/login?returnTo=/me/plantilla", status_code=303)
+        if user.jti and await is_jti_revoked(pool, user.jti):
+            return RedirectResponse(url="/login?returnTo=/me/plantilla", status_code=303)
+        if await is_user_revoked(pool, user.user_id):
+            return RedirectResponse(url="/login?returnTo=/me/plantilla", status_code=303)
+    except Exception:
+        return RedirectResponse(url="/login?returnTo=/me/plantilla", status_code=303)
+
+    # Fetch current branding config (empty dict if none)
+    from app.informes import db as informes_db
+    branding = await informes_db.get_branding_for_user(pool, usuario_id=user.user_id) or {}
+
+    return templates.TemplateResponse("pagos/plantilla.html", {
+        "request": request,
+        "user_name": user.nombre,
+        "user_email": user.email,
+        "api_base": settings.IMAGIAX_BASE_URL.rstrip("/"),
+        "viewer_url": settings.IMAGIAX_VIEWER_URL,
+        "pagar_url": f"{settings.IMAGIAX_BASE_URL.rstrip('/')}/pagar",
+        "branding": branding,
     })
