@@ -1,3 +1,5 @@
-"""app.ai — On-device AI helpers; HTTP surface is ``api.ai.router``."""
+"""app.ai — AI analysis, DICOM processing, and LLM integration."""
 
-__all__: list[str] = []
+from app.ai.router import router  # noqa: F401 — re-exported for convenience
+
+__all__ = ["router"]

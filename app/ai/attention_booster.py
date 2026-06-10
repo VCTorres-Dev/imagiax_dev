@@ -413,7 +413,7 @@ class AttentionBooster:
         # ── Convert DICOM → PNG for both phases ───────────────────────────────
         image_parts: list[Any] = []
         if dicom_images:
-            from infrastructure.dicom_service import dicom_to_png_bytes
+            from app.ai.dicom_service import dicom_to_png_bytes
             loop = asyncio.get_running_loop()
             for raw_bytes in dicom_images:
                 try:

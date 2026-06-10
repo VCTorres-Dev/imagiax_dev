@@ -18,8 +18,8 @@ from typing import Any
 
 from google import genai
 
-from infrastructure.dicom_service import dicom_to_png_bytes
-from infrastructure.llm_service import call_gemini_json
+from app.ai.dicom_service import dicom_to_png_bytes
+from app.ai.llm_service import call_gemini_json
 from app.ai.pipeline_context import QualityGateResult
 from app.ai.prompt_orchestrator import assemble_prompt, sanitize_dicom_text
 from app.core.config import settings
