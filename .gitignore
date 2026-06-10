@@ -6,6 +6,8 @@
 *.env.*
 # Excepción: el template de ejemplo SÍ se versionea (no contiene secretos reales)
 !.env.example
+# Credenciales de servicio cloud (GCP service account)
+service_account.json
 
 # SSH keys y certificados — NUNCA subir
 *.pem
