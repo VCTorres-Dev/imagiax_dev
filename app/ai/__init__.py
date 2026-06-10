@@ -1,5 +1,3 @@
-"""app.ai — AI analysis, DICOM processing, and LLM integration."""
+"""app.ai — On-device AI helpers; HTTP surface is ``api.ai.router``."""
 
-from app.ai.router import router  # noqa: F401 — re-exported for convenience
-
-__all__ = ["router"]
+__all__: list[str] = []
