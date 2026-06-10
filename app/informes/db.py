@@ -556,3 +556,140 @@ async def get_pipeline_trace(
         "quality_gate_result": _parse_json_field(row["quality_gate_result"]),
         "audit_result": _parse_json_field(row["audit_result"]),
     }
+
+
+# ── Branding config (self-service /me/branding) ──────────────────────────────
+
+
+async def create_branding_tables(pool: asyncpg.Pool) -> None:
+    """Create branding_config table if not exists.
+
+    Idempotent — safe to call on every startup alongside auth/pagos table creation.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS branding_config (
+                id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                usuario_id        UUID NOT NULL REFERENCES usuarios(id),
+                brand_name        VARCHAR(100),
+                brand_subtitle    VARCHAR(200),
+                doctor_name       VARCHAR(200),
+                doctor_specialty  VARCHAR(200),
+                doctor_license    VARCHAR(50),
+                logo_b64          TEXT,
+                signature_b64     TEXT,
+                activo            BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(usuario_id)
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_branding_config_usuario "
+            "ON branding_config (usuario_id)"
+        )
+    logger.info("IMAGIAX Branding: branding_config table ensured.")
+
+
+async def get_branding_for_user(
+    pool: asyncpg.Pool,
+    usuario_id: str,
+) -> dict | None:
+    """Get branding config for an authenticated user.
+
+    Returns the active branding row, or None if no config exists.
+    Only returns rows where activo=TRUE.
+    """
+    _uid = uuid.UUID(usuario_id)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT brand_name, brand_subtitle, doctor_name, doctor_specialty,
+                   doctor_license, logo_b64, signature_b64, activo
+            FROM branding_config
+            WHERE usuario_id = $1 AND activo = TRUE
+            """,
+            _uid,
+        )
+    return _row_to_dict(row) if row else None
+
+
+async def save_branding_config(
+    pool: asyncpg.Pool,
+    *,
+    usuario_id: str,
+    brand_name: str | None = None,
+    brand_subtitle: str | None = None,
+    doctor_name: str | None = None,
+    doctor_specialty: str | None = None,
+    doctor_license: str | None = None,
+    logo_b64: str | None = None,
+    signature_b64: str | None = None,
+) -> dict:
+    """Upsert branding config for a user.
+
+    INSERT ON CONFLICT (usuario_id) DO UPDATE — if a row already exists,
+    only non-None fields are updated (via COALESCE); None fields keep
+    their existing values. The row is always set to activo=TRUE on upsert.
+    """
+    _uid = uuid.UUID(usuario_id)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO branding_config (
+                usuario_id, brand_name, brand_subtitle,
+                doctor_name, doctor_specialty, doctor_license,
+                logo_b64, signature_b64, activo
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, TRUE
+            )
+            ON CONFLICT (usuario_id) DO UPDATE SET
+                brand_name       = COALESCE(EXCLUDED.brand_name, branding_config.brand_name),
+                brand_subtitle   = COALESCE(EXCLUDED.brand_subtitle, branding_config.brand_subtitle),
+                doctor_name      = COALESCE(EXCLUDED.doctor_name, branding_config.doctor_name),
+                doctor_specialty = COALESCE(EXCLUDED.doctor_specialty, branding_config.doctor_specialty),
+                doctor_license   = COALESCE(EXCLUDED.doctor_license, branding_config.doctor_license),
+                logo_b64         = COALESCE(EXCLUDED.logo_b64, branding_config.logo_b64),
+                signature_b64    = COALESCE(EXCLUDED.signature_b64, branding_config.signature_b64),
+                activo           = TRUE,
+                updated_at       = NOW()
+            RETURNING id, brand_name, brand_subtitle, doctor_name, doctor_specialty,
+                      doctor_license, logo_b64, signature_b64, activo
+            """,
+            _uid,
+            brand_name,
+            brand_subtitle,
+            doctor_name,
+            doctor_specialty,
+            doctor_license,
+            logo_b64,
+            signature_b64,
+        )
+    return _row_to_dict(row)
+
+
+async def set_branding_active(
+    pool: asyncpg.Pool,
+    *,
+    usuario_id: str,
+    activo: bool,
+) -> dict | None:
+    """Toggle the activo flag on a user's branding config row.
+
+    Used for soft-delete (activo=FALSE) and reactivation (activo=TRUE).
+    Returns the updated row, or None if no branding config exists for the user.
+    """
+    _uid = uuid.UUID(usuario_id)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE branding_config
+            SET activo = $2, updated_at = NOW()
+            WHERE usuario_id = $1
+            RETURNING id, brand_name, brand_subtitle, doctor_name, doctor_specialty,
+                      doctor_license, logo_b64, signature_b64, activo
+            """,
+            _uid,
+            activo,
+        )
+    return _row_to_dict(row) if row else None
