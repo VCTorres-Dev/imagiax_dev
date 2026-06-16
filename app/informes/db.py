@@ -331,10 +331,38 @@ async def get_informes_por_estudio(
     pool: asyncpg.Pool,
     study_uid: str,
     usuario_id: str | None = None,
+    clinic_id: str | None = None,
+    scope: str | None = None,
 ) -> list[dict]:
-    """Retorna informes de un estudio."""
+    """Retorna informes de un estudio. Optionally filtered by tenant clinic_id.
+
+    Tenant scoping:
+    - When scope="global", no clinic_id filter is applied.
+    - When scope is not "global" and clinic_id is provided, results are filtered
+      by clinic_id so clinic-scoped users only see their own clinic's reports.
+    """
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id and scope != "global" else None
     async with pool.acquire() as conn:
-        if usuario_id:
+        if usuario_id and _clinic_uuid:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    id, study_instance_uid, patient_id, patient_name,
+                    study_date, modalidad, ai_nivel_alerta,
+                    ai_hallazgos, ai_todas_patologias,
+                    informe_generado, informe_final, modelo_llm,
+                    estado, fue_editado, notas_rechazo,
+                    usuario_id, usuario_email,
+                    timestamp_decision, created_at, patient_age
+                FROM informes
+                WHERE study_instance_uid = $1 AND usuario_id = $2 AND clinic_id = $3
+                ORDER BY created_at DESC
+                """,
+                study_uid,
+                uuid.UUID(usuario_id),
+                _clinic_uuid,
+            )
+        elif usuario_id:
             rows = await conn.fetch(
                 """
                 SELECT
@@ -351,6 +379,24 @@ async def get_informes_por_estudio(
                 """,
                 study_uid,
                 uuid.UUID(usuario_id),
+            )
+        elif _clinic_uuid:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    id, study_instance_uid, patient_id, patient_name,
+                    study_date, modalidad, ai_nivel_alerta,
+                    ai_hallazgos, ai_todas_patologias,
+                    informe_generado, informe_final, modelo_llm,
+                    estado, fue_editado, notas_rechazo,
+                    usuario_id, usuario_email,
+                    timestamp_decision, created_at, patient_age
+                FROM informes
+                WHERE study_instance_uid = $1 AND clinic_id = $2
+                ORDER BY created_at DESC
+                """,
+                study_uid,
+                _clinic_uuid,
             )
         else:
             rows = await conn.fetch(
@@ -614,6 +660,7 @@ async def create_branding_tables(pool: asyncpg.Pool) -> None:
                 logo_b64          TEXT,
                 signature_b64     TEXT,
                 activo            BOOLEAN NOT NULL DEFAULT TRUE,
+                clinic_id         UUID,
                 created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(usuario_id)
@@ -622,6 +669,10 @@ async def create_branding_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_branding_config_usuario "
             "ON branding_config (usuario_id)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_branding_config_clinic_id "
+            "ON branding_config (clinic_id)"
         )
     logger.info("IMAGIAX Branding: branding_config table ensured.")
 

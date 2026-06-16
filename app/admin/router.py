@@ -71,6 +71,25 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=12)
 
 
+def _enforce_admin_tenant(admin: UserPayload, target_clinic_id: str | None) -> str | None:
+    """Enforce tenant scoping for clinic-scoped admins.
+
+    - Global/superadmin: pass through target_clinic_id unchanged (can specify any clinic).
+    - Clinic-scoped admin: force to admin's own clinic_id (ignore target).
+    - Returns the effective clinic_id to use for the query.
+    - Raises 401 if clinic-scoped admin has no clinic context.
+    """
+    if admin.scope == "global":
+        return target_clinic_id
+    # Clinic-scoped admin: must have their own clinic_id
+    if not admin.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    return admin.clinic_id
+
+
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 async def admin_panel(request: Request) -> Response:
     """Panel HTML del admin (SPA protegida)."""
@@ -130,9 +149,18 @@ async def list_usuarios(
     request: Request,
     user: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
-    """Lista todos los usuarios del sistema."""
+    """Lista usuarios del sistema. Clinic-scoped admins see only their clinic."""
     pool = request.app.state.pool
-    usuarios = await auth_service.list_users(pool)
+    # Tenant enforcement: clinic-scoped admins can only list users in their own clinic
+    if user.scope != "global":
+        if not user.clinic_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+            )
+        usuarios = await auth_service.list_users_by_clinic(pool, user.clinic_id)
+    else:
+        usuarios = await auth_service.list_users(pool)
     result = [admin_service.serialize_user(u) for u in usuarios]
     return JSONResponse({"usuarios": result, "total": len(result)})
 
@@ -143,8 +171,13 @@ async def create_usuario(
     request: Request,
     admin: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
-    """Crea un nuevo usuario en el sistema."""
+    """Crea un nuevo usuario en el sistema. Clinic-scoped admins can only create users in their own clinic."""
     if body.rol == "superadmin" and admin.rol != "superadmin":
+        raise HTTPException(403, "Solo el superadmin puede crear cuentas superadmin.")
+    # Tenant enforcement: clinic-scoped admins can only create users in their own clinic
+    effective_clinic_id = _enforce_admin_tenant(admin, body.clinic_id)
+    # Clinic-scoped admins cannot create superadmins
+    if admin.scope != "global" and body.rol == "superadmin":
         raise HTTPException(403, "Solo el superadmin puede crear cuentas superadmin.")
     pool = request.app.state.pool
     new_user = await auth_service.create_user(
@@ -153,7 +186,7 @@ async def create_usuario(
         password=body.password,
         nombre=body.nombre,
         rol=body.rol,
-        clinic_id=body.clinic_id,
+        clinic_id=effective_clinic_id,
     )
     await auth_service.log_audit(
         pool, admin.user_id, "admin_crear_usuario",
@@ -260,17 +293,18 @@ async def admin_informes(
     offset: int = Query(default=0, ge=0),
     user: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
-    """Lista todos los informes con filtros opcionales. Supports clinic scoping."""
+    """Lista todos los informes con filtros opcionales. Tenant-scoped for clinic admins."""
+    # Tenant enforcement: clinic-scoped admins cannot pass arbitrary clinic_id
+    effective_clinic_id = _enforce_admin_tenant(user, clinic_id)
+    _scope_uid = None if user.scope == "global" else user.user_id
     pool = request.app.state.pool
-    # Tenant scoping: admin with scope=global sees all; clinic-scoped admin sees own clinic
-    _effective_clinic_id = clinic_id or (user.clinic_id if user.scope != "global" else None)
     result = await informes_db.get_todos_informes(
         pool,
         estado=estado,
         limit=limit,
         offset=offset,
-        usuario_id=usuario_id,
-        clinic_id=_effective_clinic_id,
+        usuario_id=_scope_uid,
+        clinic_id=effective_clinic_id,
         scope=user.scope,
     )
     return JSONResponse({**result, "filtro_estado": estado, "filtro_usuario": usuario_id})
@@ -280,13 +314,23 @@ async def admin_informes(
 async def admin_informe_detail(
     informe_id: str,
     request: Request,
-    _: UserPayload = Depends(require_role("admin")),
+    user: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
-    """Retorna detalle completo de un informe."""
+    """Retorna detalle completo de un informe. Tenant-scoped for clinic admins."""
     pool = request.app.state.pool
     informe = await informes_db.get_informe_por_id(pool, informe_id)
     if not informe:
         raise HTTPException(status_code=404, detail="Informe no encontrado.")
+    # Tenant enforcement: clinic-scoped admins can only access their own clinic's informes
+    if user.scope != "global":
+        if not user.clinic_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+            )
+        informe_clinic = str(informe.get("clinic_id") or "")
+        if informe_clinic != str(user.clinic_id):
+            raise HTTPException(status_code=404, detail="Informe no encontrado.")
     if "created_at" in informe and "timestamp_creacion" not in informe:
         informe["timestamp_creacion"] = informe["created_at"]
     return JSONResponse(informe)
@@ -296,13 +340,23 @@ async def admin_informe_detail(
 async def admin_informe_pdf(
     informe_id: str,
     request: Request,
-    _: UserPayload = Depends(require_role("admin")),
+    user: UserPayload = Depends(require_role("admin")),
 ):
-    """Genera y descarga el informe medico como PDF."""
+    """Genera y descarga el informe medico como PDF. Tenant-scoped for clinic admins."""
     pool = request.app.state.pool
     informe = await informes_db.get_informe_por_id(pool, informe_id)
     if not informe:
         raise HTTPException(status_code=404, detail="Informe no encontrado.")
+    # Tenant enforcement: clinic-scoped admins can only access their own clinic's informes
+    if user.scope != "global":
+        if not user.clinic_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+            )
+        informe_clinic = str(informe.get("clinic_id") or "")
+        if informe_clinic != str(user.clinic_id):
+            raise HTTPException(status_code=404, detail="Informe no encontrado.")
     informe_generado = (informe.get("informe_generado") or "").strip()
     informe_final = (informe.get("informe_final") or "").strip()
     if not informe_generado and not informe_final:

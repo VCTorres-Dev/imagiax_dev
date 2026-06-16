@@ -509,31 +509,49 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
         )
         # constraints are added later by backfill validation, not here
 
-        await conn.execute(
-            "ALTER TABLE branding_config ADD COLUMN IF NOT EXISTS clinic_id UUID"
-        )
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_branding_config_clinic_id ON branding_config (clinic_id)"
-        )
+        # ── Non-auth table tenant columns (guarded — table may not exist on fresh DB) ──
+        # On fresh/staging DB startup, branding_config, analysis_jobs, and informes
+        # may not exist yet when auth tables are created. Use existence guards so
+        # startup is not fragile. The owning module's CREATE TABLE should include
+        # clinic_id (see branding_config in app.informes.db).
+        async def _table_exists(table_name: str) -> bool:
+            """Check whether a table exists in the public schema."""
+            return bool(await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = $1)",
+                table_name,
+            ))
 
-        # ── analysis_jobs clinic_id column (may already exist) ──────────────────
-        await conn.execute(
-            "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID"
-        )
-        # Add unique constraint for clinic-aware idempotency (same study UID in
-        # different clinics creates separate jobs; duplicate within same clinic is idempotent)
-        await conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS analysis_jobs_study_user_clinic_uniq "
-            "ON analysis_jobs (study_instance_uid, usuario_id, clinic_id)"
-        )
+        if await _table_exists("branding_config"):
+            await conn.execute(
+                "ALTER TABLE branding_config ADD COLUMN IF NOT EXISTS clinic_id UUID"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_branding_config_clinic_id ON branding_config (clinic_id)"
+            )
+        else:
+            logger.info("IMAGIAX Auth: branding_config not yet created — clinic_id ALTER skipped (will be created by owning module).")
 
-        # ── informes clinic_id column (may already exist) ────────────────────
-        await conn.execute(
-            "ALTER TABLE informes ADD COLUMN IF NOT EXISTS clinic_id UUID"
-        )
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_informes_clinic_id ON informes (clinic_id)"
-        )
+        if await _table_exists("analysis_jobs"):
+            await conn.execute(
+                "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID"
+            )
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS analysis_jobs_study_user_clinic_uniq "
+                "ON analysis_jobs (study_instance_uid, usuario_id, clinic_id)"
+            )
+        else:
+            logger.info("IMAGIAX Auth: analysis_jobs not yet created — clinic_id ALTER skipped.")
+
+        if await _table_exists("informes"):
+            await conn.execute(
+                "ALTER TABLE informes ADD COLUMN IF NOT EXISTS clinic_id UUID"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_informes_clinic_id ON informes (clinic_id)"
+            )
+        else:
+            logger.info("IMAGIAX Auth: informes not yet created — clinic_id ALTER skipped.")
 
         logger.info("IMAGIAX Auth: tenant columns ensured.")
 
@@ -734,6 +752,18 @@ async def list_users(pool: asyncpg.Pool) -> list[dict[str, Any]]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, email, nombre, rol, activo, clinic_id, scope, created_at FROM usuarios ORDER BY created_at DESC"
+        )
+        return [dict(r) for r in rows]
+
+
+async def list_users_by_clinic(pool: asyncpg.Pool, clinic_id: str) -> list[dict[str, Any]]:
+    """List users for a specific clinic only (tenant isolation for clinic-scoped admins)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, email, nombre, rol, activo, clinic_id, scope, created_at "
+            "FROM usuarios WHERE clinic_id = $1::uuid "
+            "ORDER BY created_at DESC",
+            uuid.UUID(clinic_id),
         )
         return [dict(r) for r in rows]
 

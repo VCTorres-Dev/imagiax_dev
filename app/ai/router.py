@@ -1156,15 +1156,30 @@ async def generar_informe(
 ) -> JSONResponse:
     """
     Full pipeline:
-      0) Deduplication check
-      1) Payment/credits verification
-      2) AI analysis of DICOM study
-      3) LLM report generation via Gemini Vision
-      4) Charge / credit deduction
-      5) Persist report + billing state to PostgreSQL
-      6) Return report (always — even on billing failure)
+      0) Tenant fail-closed check
+      1) Deduplication check
+      2) Payment/credits verification
+      3) AI analysis of DICOM study
+      4) LLM report generation via Gemini Vision
+      5) Charge / credit deduction
+      6) Persist report + billing state to PostgreSQL
+      7) Return report (always — even on billing failure)
     """
     orthanc = _get_orthanc_client(request)
+
+    # ── Tenant fail-closed: reject before any persistence ──────────────────────
+    # Old JWTs without clinic/scope claims MUST NOT create PHI rows with clinic_id=NULL.
+    # Clinic-scoped users without clinic_id are also rejected (session data incomplete).
+    if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
 
     # ── v1.1: Resolve pipeline version (must be before dedup check) ──────────
     # Per-request override takes precedence; falls back to global settings default.
@@ -1972,6 +1987,8 @@ async def informes_por_estudio(
             status_code=401,
             detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
         )
+    # Tenant filter: clinic-scoped users only see their own clinic's reports
+    _clinic_filter = current_user.clinic_id if current_user.scope != "global" else None
     usuario_id_filtro = (
         None
         if current_user.rol in ("admin", "superadmin")
@@ -1979,7 +1996,8 @@ async def informes_por_estudio(
     )
     try:
         informes = await informes_db.get_informes_por_estudio(
-            pool, study_instance_uid, usuario_id=usuario_id_filtro
+            pool, study_instance_uid, usuario_id=usuario_id_filtro,
+            clinic_id=_clinic_filter, scope=current_user.scope,
         )
     except HTTPException:
         raise  # BUG FIX: re-raise before generic catch
