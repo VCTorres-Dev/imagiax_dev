@@ -118,6 +118,8 @@ async def abrir_estudio_viewer(
     """
     if current_user.scope is None:
         raise HTTPException(status_code=401, detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.")
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(status_code=401, detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.")
     data = await informes_db.get_study_by_short_id(
         pool, short_id,
         clinic_id=current_user.clinic_id,

@@ -8,7 +8,7 @@ Covers:
 - Router-level tenant scoping via TestClient with DB dependency overrides:
   - ver_informe: missing scope → 401, cross-clinic → 403, same-clinic → 200
   - listado_informes: missing scope → 401, clinic-scoped filter, global sees all
-  - abrir_estudio_viewer: missing scope → 401, cross-clinic → 404
+  - abrir_estudio_viewer: missing scope → 401, clinic scope without clinic_id → 401, cross-clinic → 404
 - Branding clinic passthrough (DB function signatures accept clinic_id)
 - DB function tenant signatures (all DB functions accept clinic_id/scope)
 - Tenant validation helpers (backfill, validate)
@@ -17,7 +17,7 @@ Covers:
 - [CRITICAL-2] Admin endpoints: clinic-scoped admins cannot bypass tenant isolation
 - [CRITICAL-3] generar_informe: old JWTs cannot create PHI rows with clinic_id=NULL
 - [CRITICAL-4] informes_por_estudio: study report lookup is tenant-scoped
-- [CRITICAL-5] scope=clinic + clinic_id=None: fail-closed on study/listado + DB helpers
+  - [CRITICAL-5] scope=clinic + clinic_id=None: fail-closed on study/listado/short-link + DB helpers
 - [CRITICAL-6] Clinic-scoped admin cannot mutate cross-tenant users (PATCH/reset/delete)
 - [CRITICAL-7] Admin with scope=clinic but no clinic_id cannot mutate any user
 
@@ -1296,6 +1296,36 @@ class TestClinicScopeMissingClinicIdFailClosed(unittest.TestCase):
         self.assertEqual(result["items"], [])
         self.assertEqual(result["total"], 0)
         self.assertFalse(result["has_more"])
+        # Pool should NOT have been acquired
+        mock_pool.acquire.assert_not_called()
+
+    @patch("app.ai.router.informes_db.get_study_by_short_id", new_callable=AsyncMock)
+    def test_abrir_estudio_viewer_rejects_clinic_scope_no_clinic_id(self, mock_get):
+        """User with scope='clinic' but clinic_id=None must get 401 on /estudio/{short_id}
+        and the DB lookup must NOT be called (fail-closed before any query)."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/estudio/AbCd1234Ef", follow_redirects=False)
+        self.assertEqual(resp.status_code, 401)
+        # DB helper must NOT have been called — fail-closed before lookup
+        mock_get.assert_not_called()
+
+    def test_get_study_by_short_id_returns_none_when_no_clinic_id(self):
+        """DB helper get_study_by_short_id must return None when
+        scope='clinic' and clinic_id=None (defense-in-depth, no DB needed)."""
+        mock_pool = AsyncMock()
+        result = asyncio.run(
+            informes_db.get_study_by_short_id(
+                mock_pool,
+                short_id="AbCd1234Ef",
+                clinic_id=None,
+                scope="clinic",
+            )
+        )
+        self.assertIsNone(result)
         # Pool should NOT have been acquired
         mock_pool.acquire.assert_not_called()
 

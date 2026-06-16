@@ -576,7 +576,18 @@ async def get_study_by_short_id(
     clinic_id: str | None = None,
     scope: str | None = None,
 ) -> dict | None:
-    """Busca informe por short_id. Optionally filtered by tenant clinic_id."""
+    """Busca informe por short_id. Optionally filtered by tenant clinic_id.
+
+    Tenant scoping:
+    - When scope="global", no clinic_id filter is applied.
+    - When scope is not "global" and clinic_id is provided, results are filtered
+      by clinic_id so clinic-scoped users only see their own clinic's reports.
+    - Defense-in-depth: when scope is not "global" and clinic_id is None,
+      returns None (fail-closed — never run an unscoped query).
+    """
+    # Defense-in-depth: non-global scope without clinic_id must return None
+    if scope and scope != "global" and not clinic_id:
+        return None
     _clinic_uuid = uuid.UUID(clinic_id) if clinic_id and scope != "global" else None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
