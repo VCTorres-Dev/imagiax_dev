@@ -127,6 +127,9 @@ async def auth_login(body: LoginRequest, request: Request) -> JSONResponse:
     expire_hours = float(settings.JWT_REMEMBER_HOURS if body.remember else settings.JWT_EXPIRE_HOURS)
     # Session fingerprinting: bind JWT to the device's User-Agent
     session_fp = generate_session_fingerprint(request)
+    # Tenant claims: carry clinic_id and scope from the authenticated user
+    _clinic_id = str(user.get("clinic_id")) if user.get("clinic_id") else None
+    _scope = user.get("scope") or ("global" if user.get("rol") == "superadmin" else "clinic")
     token = create_access_token(
         user_id=str(user["id"]),
         email=user["email"],
@@ -136,6 +139,8 @@ async def auth_login(body: LoginRequest, request: Request) -> JSONResponse:
         fingerprint=session_fp,
         # SEC-H03: Store the session type so sliding-window renewal preserves it.
         remember=body.remember,
+        clinic_id=_clinic_id,
+        scope=_scope,
     )
 
     # 5b) Clear failed attempts on successful login — C-003
@@ -162,6 +167,8 @@ async def auth_login(body: LoginRequest, request: Request) -> JSONResponse:
             "email": user["email"],
             "nombre": user["nombre"],
             "rol": user["rol"],
+            "clinic_id": str(user["clinic_id"]) if user.get("clinic_id") else None,
+            "scope": user.get("scope") or ("global" if user["rol"] == "superadmin" else "clinic"),
         },
     })
     response.set_cookie(
@@ -188,6 +195,8 @@ async def auth_me(
             "email": current_user.email,
             "nombre": current_user.nombre,
             "rol": current_user.rol,
+            "clinic_id": current_user.clinic_id,
+            "scope": current_user.scope,
         }
     })
 

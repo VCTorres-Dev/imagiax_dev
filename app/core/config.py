@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     IMAGIAX_BASE_URL: str = "http://localhost:8010"
     IMAGIAX_VIEWER_URL: str = "http://localhost:3000"
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # ── Bootstrap mode ────────────────────────────────────────────────────
+    # IMAGIAX_BOOTSTRAP_MODE: when "1" AND APP_ENV=development, tenant checks
+    # are relaxed for initial setup. When absent or "0", tenant validation is
+    # enforced on all operations. When "1" AND APP_ENV=production, the app
+    # refuses to start — bootstrap mode is not permitted in production.
+    IMAGIAX_BOOTSTRAP_MODE: str = "0"
 
     # Doctor / brand identity (exposed to frontend via /config endpoint)
     IMAGIAX_DOCTOR_NAME: str = ""
@@ -120,6 +126,11 @@ class Settings(BaseSettings):
         return self.APP_ENV == "production"
 
     @property
+    def bootstrap_mode(self) -> bool:
+        """True when IMAGIAX_BOOTSTRAP_MODE == '1' (only safe in development)."""
+        return self.IMAGIAX_BOOTSTRAP_MODE.strip() == "1"
+
+    @property
     def cors_origins_list(self) -> list[str]:
         """CORS_ORIGINS split into a list, with whitespace trimmed."""
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
@@ -189,6 +200,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CORS_ORIGINS contains wildcard '*' — forbidden when allow_credentials=True. "
                 "Specify explicit origins in CORS_ORIGINS env var."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def bootstrap_not_in_production(self) -> "Settings":
+        """Bootstrap mode is not permitted in production — would bypass tenant checks."""
+        if self.APP_ENV == "production" and self.IMAGIAX_BOOTSTRAP_MODE.strip() == "1":
+            raise ValueError(
+                "IMAGIAX_BOOTSTRAP_MODE=1 is not permitted when APP_ENV=production. "
+                "Tenant validation must be enforced in production. "
+                "Set IMAGIAX_BOOTSTRAP_MODE=0 or remove it from your .env file."
             )
         return self
 
