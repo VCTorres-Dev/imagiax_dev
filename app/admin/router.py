@@ -58,6 +58,7 @@ class CreateUserRequest(BaseModel):
     password: str = Field(min_length=12)
     nombre: str = Field(min_length=2)
     rol: str = "medico"
+    clinic_id: str | None = None
 
 
 class UpdateUserRequest(BaseModel):
@@ -152,6 +153,7 @@ async def create_usuario(
         password=body.password,
         nombre=body.nombre,
         rol=body.rol,
+        clinic_id=body.clinic_id,
     )
     await auth_service.log_audit(
         pool, admin.user_id, "admin_crear_usuario",
@@ -165,6 +167,7 @@ async def create_usuario(
             "email": new_user["email"],
             "nombre": new_user["nombre"],
             "rol": new_user["rol"],
+            "clinic_id": str(new_user["clinic_id"]) if new_user.get("clinic_id") else None,
         },
     }, status_code=201)
 
@@ -252,13 +255,24 @@ async def admin_informes(
     request: Request,
     estado: str | None = Query(default=None),
     usuario_id: str | None = Query(default=None),
+    clinic_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _: UserPayload = Depends(require_role("admin")),
+    user: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
-    """Lista todos los informes con filtros opcionales."""
+    """Lista todos los informes con filtros opcionales. Supports clinic scoping."""
     pool = request.app.state.pool
-    result = await informes_db.get_todos_informes(pool, estado=estado, limit=limit, offset=offset, usuario_id=usuario_id)
+    # Tenant scoping: admin with scope=global sees all; clinic-scoped admin sees own clinic
+    _effective_clinic_id = clinic_id or (user.clinic_id if user.scope != "global" else None)
+    result = await informes_db.get_todos_informes(
+        pool,
+        estado=estado,
+        limit=limit,
+        offset=offset,
+        usuario_id=usuario_id,
+        clinic_id=_effective_clinic_id,
+        scope=user.scope,
+    )
     return JSONResponse({**result, "filtro_estado": estado, "filtro_usuario": usuario_id})
 
 

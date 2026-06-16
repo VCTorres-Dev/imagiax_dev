@@ -33,10 +33,15 @@ async def get_branding(
 ) -> dict:
     """Return the authenticated user's active branding config.
 
+    Branding is clinic-scoped: users in the same clinic share branding config.
     Returns branding fields or an empty dict if no config exists.
     """
     pool = request.app.state.pool
-    result = await informes_db.get_branding_for_user(pool, usuario_id=user.user_id)
+    result = await informes_db.get_branding_for_user(
+        pool,
+        usuario_id=user.user_id,
+        clinic_id=user.clinic_id,
+    )
     if result is None:
         return {}
     return result
@@ -52,6 +57,7 @@ async def put_branding(
 
     All fields are optional — None means "keep existing value".
     The user_id field is always forced to None (ignored).
+    Branding is persisted with clinic_id for clinic-level isolation.
     """
     pool = request.app.state.pool
     result = await informes_db.save_branding_config(
@@ -64,6 +70,7 @@ async def put_branding(
         doctor_license=body.doctor_license,
         logo_b64=body.logo_b64,
         signature_b64=body.signature_b64,
+        clinic_id=user.clinic_id,
     )
     return result
 
@@ -79,7 +86,8 @@ async def delete_branding(
     """
     pool = request.app.state.pool
     result = await informes_db.set_branding_active(
-        pool, usuario_id=user.user_id, activo=False
+        pool, usuario_id=user.user_id, activo=False,
+        clinic_id=user.clinic_id,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="No existe configuración de branding para eliminar")

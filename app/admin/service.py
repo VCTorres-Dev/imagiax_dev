@@ -204,12 +204,14 @@ async def get_pagos_summary(pool: asyncpg.Pool) -> dict[str, Any]:
     return result
 
 def serialize_user(u: dict) -> dict:
-    """Serializa un registro de usuario para la API."""
+    """Serializa un registro de usuario para la API. Includes tenant fields."""
     return {
         "id": str(u["id"]),
         "email": u["email"],
         "nombre": u["nombre"],
         "rol": u["rol"],
         "activo": u["activo"],
+        "clinic_id": str(u["clinic_id"]) if u.get("clinic_id") else None,
+        "scope": u.get("scope"),
         "created_at": u["created_at"].isoformat() if u.get("created_at") else None,
     }
