@@ -600,17 +600,18 @@ class TestFreshDBTenantMigrationGuards(unittest.TestCase):
     def test_create_auth_tables_handles_missing_tables_gracefully(self):
         """ALTER TABLE on non-existent tables should be guarded, not crash.
 
-        Verifies the function does not raise when non-auth tables (branding_config,
-        analysis_jobs, informes) don't exist yet on a fresh DB.
+        Verifies the function uses the _table_exists helper (now module-level)
+        and contains guard logic for missing non-auth tables.
         """
-        from app.auth.service import create_auth_tables
+        from app.auth.service import create_auth_tables, _table_exists
 
-        # We verify the function can be imported and contains the existence guard logic
-        # by checking that the source includes the _table_exists helper.
+        # _table_exists is a module-level shared helper — verify it exists
+        self.assertTrue(callable(_table_exists))
+
+        # Verify create_auth_tables source references the helper
         import inspect
         source = inspect.getsource(create_auth_tables)
         self.assertIn("_table_exists", source)
-        self.assertIn("information_schema.tables", source)
         # Verify logging for skipped tables
         self.assertIn("clinic_id ALTER skipped", source)
 
@@ -623,6 +624,283 @@ class TestFreshDBTenantMigrationGuards(unittest.TestCase):
         params = list(sig.parameters.keys())
         self.assertIn("pool", params)
         self.assertIn("clinic_id", params)
+
+    def test_backfill_tenant_columns_source_has_existence_guards(self):
+        """backfill_tenant_columns must check table existence before UPDATEs."""
+        import inspect
+        from app.auth.service import backfill_tenant_columns
+
+        source = inspect.getsource(backfill_tenant_columns)
+        self.assertIn("_table_exists", source)
+        self.assertIn("informes", source)
+        self.assertIn("analysis_jobs", source)
+        self.assertIn("branding_config", source)
+        # Must log when skipping
+        self.assertIn("backfill skipped", source)
+
+    def test_validate_tenant_null_counts_source_has_existence_guards(self):
+        """validate_tenant_null_counts must check table existence before SELECTs."""
+        import inspect
+        from app.auth.service import validate_tenant_null_counts
+
+        source = inspect.getsource(validate_tenant_null_counts)
+        self.assertIn("_table_exists", source)
+        self.assertIn("informes", source)
+        self.assertIn("analysis_jobs", source)
+        self.assertIn("branding_config", source)
+        # Must log when skipping
+        self.assertIn("validation skipped", source)
+
+
+class TestFreshDBBackfillBehavior(unittest.TestCase):
+    """backfill_tenant_columns must return 0 counts for missing tables, not crash.
+
+    Uses a mock asyncpg pool/connection where _table_exists returns False
+    for non-auth tables, simulating a fresh database.
+    """
+
+    @staticmethod
+    def _make_fake_conn(existing_tables: set[str]) -> AsyncMock:
+        """Build a fake asyncpg Connection that reports only existing_tables as present.
+
+        - fetchval for _table_exists: returns True only for tables in existing_tables.
+        - execute for UPDATE: returns "UPDATE 0" (no rows affected).
+        - supports async context manager.
+        """
+        conn = AsyncMock()
+
+        async def _fake_fetchval(query, *args, **kwargs):
+            # Intercept _table_exists queries
+            if "information_schema.tables" in query:
+                # args[0] is the table_name parameter ($1)
+                table_name = args[0] if args else None
+                return table_name in existing_tables
+            # For COUNT(*) queries, return 0
+            if "COUNT" in query:
+                return 0
+            return None
+
+        async def _fake_execute(query, *args, **kwargs):
+            return "UPDATE 0"
+
+        conn.fetchval = _fake_fetchval
+        conn.execute = _fake_execute
+        return conn
+
+    @staticmethod
+    def _make_fake_pool(conn: AsyncMock) -> AsyncMock:
+        """Build a fake pool that yields the given conn on acquire().
+
+        asyncpg.Pool.acquire() returns an async context manager, not a coroutine.
+        We mock this by returning a custom object with __aenter__/__aexit__.
+        """
+        pool = MagicMock()
+
+        class _AcquireContext:
+            async def __aenter__(self_inner):
+                return conn
+            async def __aexit__(self_inner, *exc):
+                pass
+
+        pool.acquire.return_value = _AcquireContext()
+        return pool
+
+    def test_backfill_skips_missing_informes(self):
+        """When informes table is absent, backfill returns 0 instead of crashing."""
+        from app.auth.service import backfill_tenant_columns
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(backfill_tenant_columns(pool))
+        self.assertEqual(result["informes_backfilled"], 0)
+
+    def test_backfill_skips_missing_analysis_jobs(self):
+        """When analysis_jobs table is absent, backfill returns 0 instead of crashing."""
+        from app.auth.service import backfill_tenant_columns
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(backfill_tenant_columns(pool))
+        self.assertEqual(result["analysis_jobs_backfilled"], 0)
+
+    def test_backfill_skips_missing_branding_config(self):
+        """When branding_config table is absent, backfill returns 0 instead of crashing."""
+        from app.auth.service import backfill_tenant_columns
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(backfill_tenant_columns(pool))
+        self.assertEqual(result["branding_config_backfilled"], 0)
+
+    def test_backfill_all_tables_missing_still_returns_usuarios_counts(self):
+        """On a completely fresh DB, backfill still processes usuarios (always exists)."""
+        from app.auth.service import backfill_tenant_columns
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(backfill_tenant_columns(pool))
+        # usuarios keys must always be present
+        self.assertIn("usuarios_backfilled", result)
+        self.assertIn("superadmin_scope_set", result)
+        # All non-auth tables should be 0
+        self.assertEqual(result["informes_backfilled"], 0)
+        self.assertEqual(result["analysis_jobs_backfilled"], 0)
+        self.assertEqual(result["branding_config_backfilled"], 0)
+
+    def test_backfill_all_tables_present_updates_all(self):
+        """When all tables exist, backfill attempts UPDATE on each (behavior preserved)."""
+        from app.auth.service import backfill_tenant_columns
+
+        conn = self._make_fake_conn(existing_tables={"usuarios", "informes", "analysis_jobs", "branding_config"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(backfill_tenant_columns(pool))
+        # All keys present — values are 0 because mock execute returns "UPDATE 0"
+        self.assertIn("informes_backfilled", result)
+        self.assertIn("analysis_jobs_backfilled", result)
+        self.assertIn("branding_config_backfilled", result)
+
+
+class TestFreshDBValidateBehavior(unittest.TestCase):
+    """validate_tenant_null_counts must return 0 for missing tables, not crash.
+
+    Uses a mock asyncpg pool/connection where _table_exists returns False
+    for non-auth tables, simulating a fresh database.
+    """
+
+    @staticmethod
+    def _make_fake_conn(existing_tables: set[str]) -> AsyncMock:
+        """Build a fake asyncpg Connection for validation (fetchval-only)."""
+        conn = AsyncMock()
+
+        async def _fake_fetchval(query, *args, **kwargs):
+            # Intercept _table_exists queries
+            if "information_schema.tables" in query:
+                table_name = args[0] if args else None
+                return table_name in existing_tables
+            # For COUNT(*) queries, return 0
+            if "COUNT" in query:
+                return 0
+            return None
+
+        conn.fetchval = _fake_fetchval
+        return conn
+
+    @staticmethod
+    def _make_fake_pool(conn: AsyncMock) -> MagicMock:
+        """Build a fake pool that yields the given conn on acquire().
+
+        asyncpg.Pool.acquire() returns an async context manager, not a coroutine.
+        """
+        pool = MagicMock()
+
+        class _AcquireContext:
+            async def __aenter__(self_inner):
+                return conn
+            async def __aexit__(self_inner, *exc):
+                pass
+
+        pool.acquire.return_value = _AcquireContext()
+        return pool
+
+    def test_validate_skips_missing_informes(self):
+        """When informes is absent, validation returns 0 for that key."""
+        from app.auth.service import validate_tenant_null_counts
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(validate_tenant_null_counts(pool))
+        self.assertEqual(result["informes_null_clinic"], 0)
+
+    def test_validate_skips_missing_analysis_jobs(self):
+        """When analysis_jobs is absent, validation returns 0 for that key."""
+        from app.auth.service import validate_tenant_null_counts
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(validate_tenant_null_counts(pool))
+        self.assertEqual(result["analysis_jobs_null_clinic"], 0)
+
+    def test_validate_skips_missing_branding_config(self):
+        """When branding_config is absent, validation returns 0 for that key."""
+        from app.auth.service import validate_tenant_null_counts
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(validate_tenant_null_counts(pool))
+        self.assertEqual(result["branding_config_null_clinic"], 0)
+
+    def test_validate_all_tables_missing_returns_zeros(self):
+        """Fresh DB: all non-auth counts are 0, usuarios still validated."""
+        from app.auth.service import validate_tenant_null_counts
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(validate_tenant_null_counts(pool))
+        self.assertIn("usuarios_non_superadmin_null_clinic", result)
+        self.assertEqual(result["informes_null_clinic"], 0)
+        self.assertEqual(result["analysis_jobs_null_clinic"], 0)
+        self.assertEqual(result["branding_config_null_clinic"], 0)
+
+    def test_validate_all_tables_present_queries_all(self):
+        """When all tables exist, validation queries each (behavior preserved)."""
+        from app.auth.service import validate_tenant_null_counts
+
+        conn = self._make_fake_conn(existing_tables={"usuarios", "informes", "analysis_jobs", "branding_config"})
+        pool = self._make_fake_pool(conn)
+
+        result = asyncio.run(validate_tenant_null_counts(pool))
+        # All keys present and all values 0 (mock fetchval returns 0 for COUNT)
+        self.assertEqual(result["informes_null_clinic"], 0)
+        self.assertEqual(result["analysis_jobs_null_clinic"], 0)
+        self.assertEqual(result["branding_config_null_clinic"], 0)
+
+    def test_validate_missing_table_does_not_hit_count_query(self):
+        """When a table is absent, the COUNT query for that table must NOT be executed.
+
+        This ensures the guard is truly preventing the query, not just catching errors.
+        We track call count to the mock fetchval to verify no COUNT was issued for
+        a missing table.
+        """
+        from app.auth.service import validate_tenant_null_counts
+
+        conn = self._make_fake_conn(existing_tables={"usuarios"})
+        pool = self._make_fake_pool(conn)
+
+        # Wrap fetchval to track calls
+        call_log: list[str] = []
+
+        original_fetchval = conn.fetchval
+
+        async def _tracking_fetchval(query, *args, **kwargs):
+            call_log.append(query.strip().upper())
+            return await original_fetchval(query, *args, **kwargs)
+
+        conn.fetchval = _tracking_fetchval
+
+        asyncio.run(validate_tenant_null_counts(pool))
+
+        # No query should contain "FROM INFORMES" (only "INFORMES" in _table_exists check)
+        informes_queries = [q for q in call_log if "FROM INFORMES" in q]
+        self.assertEqual(
+            len(informes_queries), 0,
+            f"Expected no COUNT(*) FROM informes query, but got: {informes_queries}",
+        )
+        # The _table_exists check for informes should have happened
+        table_check_queries = [q for q in call_log if "INFORMATION_SCHEMA.TABLES" in q and "INFORMES" not in q]
+        # At least one information_schema check should exist
+        self.assertTrue(
+            any("INFORMATION_SCHEMA.TABLES" in q for q in call_log),
+            "Expected _table_exists check via information_schema.tables",
+        )
 
 
 # ── [CRITICAL-2] Admin Tenant Isolation ────────────────────────────────────────

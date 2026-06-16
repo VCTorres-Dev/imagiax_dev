@@ -514,15 +514,7 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
         # may not exist yet when auth tables are created. Use existence guards so
         # startup is not fragile. The owning module's CREATE TABLE should include
         # clinic_id (see branding_config in app.informes.db).
-        async def _table_exists(table_name: str) -> bool:
-            """Check whether a table exists in the public schema."""
-            return bool(await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema = 'public' AND table_name = $1)",
-                table_name,
-            ))
-
-        if await _table_exists("branding_config"):
+        if await _table_exists(conn, "branding_config"):
             await conn.execute(
                 "ALTER TABLE branding_config ADD COLUMN IF NOT EXISTS clinic_id UUID"
             )
@@ -532,7 +524,7 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
         else:
             logger.info("IMAGIAX Auth: branding_config not yet created — clinic_id ALTER skipped (will be created by owning module).")
 
-        if await _table_exists("analysis_jobs"):
+        if await _table_exists(conn, "analysis_jobs"):
             await conn.execute(
                 "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID"
             )
@@ -543,7 +535,7 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
         else:
             logger.info("IMAGIAX Auth: analysis_jobs not yet created — clinic_id ALTER skipped.")
 
-        if await _table_exists("informes"):
+        if await _table_exists(conn, "informes"):
             await conn.execute(
                 "ALTER TABLE informes ADD COLUMN IF NOT EXISTS clinic_id UUID"
             )
@@ -563,17 +555,35 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
 _PILOT_CLINIC_ID = os.getenv("IMAGIAX_PILOT_CLINIC_ID", "00000000-0000-0000-0000-000000000000")
 
 
+async def _table_exists(conn: asyncpg.Connection, table_name: str) -> bool:
+    """Check whether a table exists in the public schema.
+
+    Shared helper used by create_auth_tables, backfill_tenant_columns,
+    and validate_tenant_null_counts to guard against missing tables
+    on fresh/staging databases.
+    """
+    return bool(await conn.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = $1)",
+        table_name,
+    ))
+
+
 async def backfill_tenant_columns(pool: asyncpg.Pool) -> dict[str, int]:
     """Idempotent backfill: assign pilot clinic UUID to rows with NULL tenant columns.
 
     Returns counts of affected rows for each table.
     Superadmin rows with scope='global' keep clinic_id=NULL.
+
+    Gracefully skips non-auth tables (informes, analysis_jobs, branding_config)
+    that do not yet exist on fresh/staging databases — returns 0 for those.
     """
     pilot = _PILOT_CLINIC_ID
     results: dict[str, int] = {}
 
     async with pool.acquire() as conn:
         # 1) Backfill usuarios: non-superadmin NULL clinic_id → pilot clinic
+        #    (usuarios always exists — created by create_auth_tables)
         res = await conn.execute(
             """
             UPDATE usuarios
@@ -600,37 +610,49 @@ async def backfill_tenant_columns(pool: asyncpg.Pool) -> dict[str, int]:
 
         # 3) Backfill informes: NULL clinic_id → pilot clinic
         #    (ideally from owner user's clinic, but pilot is the safe default)
-        res3 = await conn.execute(
-            """
-            UPDATE informes
-            SET clinic_id = $1::uuid
-            WHERE clinic_id IS NULL
-            """,
-            uuid.UUID(pilot),
-        )
-        results["informes_backfilled"] = int(res3.split()[-1]) if res3 else 0
+        if await _table_exists(conn, "informes"):
+            res3 = await conn.execute(
+                """
+                UPDATE informes
+                SET clinic_id = $1::uuid
+                WHERE clinic_id IS NULL
+                """,
+                uuid.UUID(pilot),
+            )
+            results["informes_backfilled"] = int(res3.split()[-1]) if res3 else 0
+        else:
+            results["informes_backfilled"] = 0
+            logger.info("IMAGIAX Auth: informes table not yet created — backfill skipped.")
 
         # 4) Backfill analysis_jobs: NULL clinic_id → pilot clinic
-        res4 = await conn.execute(
-            """
-            UPDATE analysis_jobs
-            SET clinic_id = $1::uuid
-            WHERE clinic_id IS NULL
-            """,
-            uuid.UUID(pilot),
-        )
-        results["analysis_jobs_backfilled"] = int(res4.split()[-1]) if res4 else 0
+        if await _table_exists(conn, "analysis_jobs"):
+            res4 = await conn.execute(
+                """
+                UPDATE analysis_jobs
+                SET clinic_id = $1::uuid
+                WHERE clinic_id IS NULL
+                """,
+                uuid.UUID(pilot),
+            )
+            results["analysis_jobs_backfilled"] = int(res4.split()[-1]) if res4 else 0
+        else:
+            results["analysis_jobs_backfilled"] = 0
+            logger.info("IMAGIAX Auth: analysis_jobs table not yet created — backfill skipped.")
 
         # 5) Backfill branding_config: NULL clinic_id → pilot clinic
-        res5 = await conn.execute(
-            """
-            UPDATE branding_config
-            SET clinic_id = $1::uuid
-            WHERE clinic_id IS NULL
-            """,
-            uuid.UUID(pilot),
-        )
-        results["branding_config_backfilled"] = int(res5.split()[-1]) if res5 else 0
+        if await _table_exists(conn, "branding_config"):
+            res5 = await conn.execute(
+                """
+                UPDATE branding_config
+                SET clinic_id = $1::uuid
+                WHERE clinic_id IS NULL
+                """,
+                uuid.UUID(pilot),
+            )
+            results["branding_config_backfilled"] = int(res5.split()[-1]) if res5 else 0
+        else:
+            results["branding_config_backfilled"] = 0
+            logger.info("IMAGIAX Auth: branding_config table not yet created — backfill skipped.")
 
     logger.info(
         "IMAGIAX Auth: tenant backfill complete — %s",
@@ -643,20 +665,43 @@ async def validate_tenant_null_counts(pool: asyncpg.Pool) -> dict[str, int]:
     """Read-only validation: count NULL tenant rows before adding constraints.
 
     Returns counts of NULL rows per table. If all are zero, constraints are safe.
+
+    Gracefully returns 0 for non-auth tables (informes, analysis_jobs,
+    branding_config) that do not yet exist on fresh/staging databases.
     """
     async with pool.acquire() as conn:
+        # usuarios always exists — created by create_auth_tables
         usuarios_null = await conn.fetchval(
             "SELECT COUNT(*) FROM usuarios WHERE clinic_id IS NULL AND rol != 'superadmin'"
         )
-        informes_null = await conn.fetchval(
-            "SELECT COUNT(*) FROM informes WHERE clinic_id IS NULL"
-        )
-        jobs_null = await conn.fetchval(
-            "SELECT COUNT(*) FROM analysis_jobs WHERE clinic_id IS NULL"
-        )
-        branding_null = await conn.fetchval(
-            "SELECT COUNT(*) FROM branding_config WHERE clinic_id IS NULL"
-        )
+
+        # informes may not exist on fresh DB
+        if await _table_exists(conn, "informes"):
+            informes_null = await conn.fetchval(
+                "SELECT COUNT(*) FROM informes WHERE clinic_id IS NULL"
+            )
+        else:
+            informes_null = 0
+            logger.info("IMAGIAX Auth: informes table not yet created — validation skipped.")
+
+        # analysis_jobs may not exist on fresh DB
+        if await _table_exists(conn, "analysis_jobs"):
+            jobs_null = await conn.fetchval(
+                "SELECT COUNT(*) FROM analysis_jobs WHERE clinic_id IS NULL"
+            )
+        else:
+            jobs_null = 0
+            logger.info("IMAGIAX Auth: analysis_jobs table not yet created — validation skipped.")
+
+        # branding_config may not exist on fresh DB
+        if await _table_exists(conn, "branding_config"):
+            branding_null = await conn.fetchval(
+                "SELECT COUNT(*) FROM branding_config WHERE clinic_id IS NULL"
+            )
+        else:
+            branding_null = 0
+            logger.info("IMAGIAX Auth: branding_config table not yet created — validation skipped.")
+
     return {
         "usuarios_non_superadmin_null_clinic": usuarios_null or 0,
         "informes_null_clinic": informes_null or 0,
