@@ -678,10 +678,10 @@ async def get_user_by_email(pool: asyncpg.Pool, email: str) -> dict[str, Any] | 
 
 
 async def get_user_by_id(pool: asyncpg.Pool, user_id: str) -> dict[str, Any] | None:
-    """Look up a user by UUID."""
+    """Look up a user by UUID. Returns clinic_id and scope for tenant enforcement."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, email, nombre, rol, activo, created_at FROM usuarios WHERE id = $1",
+            "SELECT id, email, nombre, rol, activo, clinic_id, scope, created_at FROM usuarios WHERE id = $1",
             uuid.UUID(user_id),
         )
         return dict(row) if row else None

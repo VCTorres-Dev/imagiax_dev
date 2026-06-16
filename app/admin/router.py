@@ -90,6 +90,29 @@ def _enforce_admin_tenant(admin: UserPayload, target_clinic_id: str | None) -> s
     return admin.clinic_id
 
 
+def _verify_target_tenant(admin: UserPayload, target: dict) -> None:
+    """Verify that a clinic-scoped admin can operate on the target user.
+
+    - Global/superadmin: always allowed.
+    - Clinic-scoped admin: target user's clinic_id must match admin's clinic_id.
+    - Raises 403 if tenant ownership check fails.
+    - Raises 401 if clinic-scoped admin has no clinic context.
+    """
+    if admin.scope == "global":
+        return  # superadmin can operate on any user
+    if not admin.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    target_clinic = str(target.get("clinic_id") or "")
+    if target_clinic != str(admin.clinic_id):
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes permiso para modificar usuarios de otra clínica.",
+        )
+
+
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 async def admin_panel(request: Request) -> Response:
     """Panel HTML del admin (SPA protegida)."""
@@ -219,8 +242,12 @@ async def update_usuario(
         raise HTTPException(400, "No puedes desactivar tu propia cuenta.")
     pool = request.app.state.pool
     target = await auth_service.get_user_by_id(pool, usuario_id)
-    if target and target["rol"] == "superadmin" and admin.rol != "superadmin":
+    if not target:
+        raise HTTPException(404, "Usuario no encontrado.")
+    if target["rol"] == "superadmin" and admin.rol != "superadmin":
         raise HTTPException(403, "No tienes permiso para modificar la cuenta superadmin.")
+    # Tenant enforcement: clinic-scoped admin can only modify users in same clinic
+    _verify_target_tenant(admin, target)
     updated = await auth_service.update_user(pool, usuario_id, nombre=body.nombre, rol=body.rol, activo=body.activo)
     if updated is None:
         raise HTTPException(404, "Usuario no encontrado.")
@@ -246,6 +273,8 @@ async def reset_password(
         raise HTTPException(404, "Usuario no encontrado.")
     if target["rol"] == "superadmin" and admin.rol != "superadmin":
         raise HTTPException(403, "No tienes permiso para cambiar la contrasena del superadmin.")
+    # Tenant enforcement: clinic-scoped admin can only reset passwords for users in same clinic
+    _verify_target_tenant(admin, target)
     await auth_service.update_password(pool, usuario_id, body.new_password)
     await auth_service.log_audit(
         pool, admin.user_id, "admin_reset_password",
@@ -265,12 +294,13 @@ async def delete_usuario(
     if usuario_id == admin.user_id:
         raise HTTPException(400, "No puedes eliminar tu propia cuenta.")
     pool = request.app.state.pool
-    target_pre = await auth_service.get_user_by_id(pool, usuario_id)
-    if target_pre and target_pre["rol"] == "superadmin":
-        raise HTTPException(403, "La cuenta superadmin no puede ser eliminada.")
     target = await auth_service.get_user_by_id(pool, usuario_id)
     if not target:
         raise HTTPException(404, "Usuario no encontrado.")
+    if target["rol"] == "superadmin":
+        raise HTTPException(403, "La cuenta superadmin no puede ser eliminada.")
+    # Tenant enforcement: clinic-scoped admin can only delete users in same clinic
+    _verify_target_tenant(admin, target)
     await auth_service.revoke_all_user_tokens(pool, usuario_id)
     deleted = await auth_service.delete_user(pool, usuario_id)
     if not deleted:

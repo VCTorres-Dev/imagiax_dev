@@ -211,6 +211,11 @@ async def listado_informes(
             status_code=401,
             detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
         )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
 
     _scope_uid = (
         None

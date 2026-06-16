@@ -340,7 +340,13 @@ async def get_informes_por_estudio(
     - When scope="global", no clinic_id filter is applied.
     - When scope is not "global" and clinic_id is provided, results are filtered
       by clinic_id so clinic-scoped users only see their own clinic's reports.
+    - Defense-in-depth: when scope is not "global" and clinic_id is None,
+      returns empty list (fail-closed — never run an unscoped query).
     """
+    # Defense-in-depth: non-global scope without clinic_id must return no rows
+    if scope and scope != "global" and not clinic_id:
+        return []
+
     _clinic_uuid = uuid.UUID(clinic_id) if clinic_id and scope != "global" else None
     async with pool.acquire() as conn:
         if usuario_id and _clinic_uuid:
@@ -467,13 +473,24 @@ async def get_todos_informes(
     - When scope="global", no clinic_id filter is applied (superadmin sees all).
     - When scope is not "global" and clinic_id is provided, results are filtered
       by clinic_id so clinic-scoped users only see their own clinic's informes.
-    - When clinic_id is None and scope is not "global", a zero-UUID fallback is
-      used (returns no rows — defense-in-depth for missing tenant context).
+    - Defense-in-depth: when scope is not "global" and clinic_id is None,
+      returns zero-total result (fail-closed — never run an unscoped query).
 
     P4-FIX: Uses COUNT(*) OVER() window function to get total in the same query
     instead of a separate COUNT query (2 round-trips → 1).
     Also uses NULL-coalescing WHERE pattern to avoid f-string SQL (W4 pattern).
     """
+    # Defense-in-depth: non-global scope without clinic_id must return no rows
+    if scope and scope != "global" and not clinic_id:
+        return {
+            "items": [],
+            "total": 0,
+            "limit": min(limit, 500),
+            "offset": offset,
+            "has_more": False,
+            "next_cursor": None,
+        }
+
     limit = min(limit, 500)
     _uid = uuid.UUID(usuario_id) if usuario_id else None
     # Tenant clinic filter: only apply when scope is not "global"

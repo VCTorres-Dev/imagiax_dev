@@ -1987,6 +1987,11 @@ async def informes_por_estudio(
             status_code=401,
             detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
         )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
     # Tenant filter: clinic-scoped users only see their own clinic's reports
     _clinic_filter = current_user.clinic_id if current_user.scope != "global" else None
     usuario_id_filtro = (
@@ -2034,6 +2039,11 @@ async def listado_informes(
     """
     # Tenant fail-closed: missing tenant context means re-login required
     if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    if current_user.scope != "global" and not current_user.clinic_id:
         raise HTTPException(
             status_code=401,
             detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",

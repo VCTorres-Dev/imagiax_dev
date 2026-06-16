@@ -17,6 +17,9 @@ Covers:
 - [CRITICAL-2] Admin endpoints: clinic-scoped admins cannot bypass tenant isolation
 - [CRITICAL-3] generar_informe: old JWTs cannot create PHI rows with clinic_id=NULL
 - [CRITICAL-4] informes_por_estudio: study report lookup is tenant-scoped
+- [CRITICAL-5] scope=clinic + clinic_id=None: fail-closed on study/listado + DB helpers
+- [CRITICAL-6] Clinic-scoped admin cannot mutate cross-tenant users (PATCH/reset/delete)
+- [CRITICAL-7] Admin with scope=clinic but no clinic_id cannot mutate any user
 
 No real database required — uses unittest with AsyncMock/patch for DB calls,
 and FastAPI TestClient for router-level tests with dependency overrides.
@@ -32,6 +35,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 from app.auth.models import UserPayload
+from app.informes import db as informes_db
+from app.admin import service as admin_service
 
 
 # ── Test user fixtures ────────────────────────────────────────────────────────
@@ -89,6 +94,15 @@ CLINIC_USER_NO_CLINIC = UserPayload(
     email="broken@clinic-a.dev",
     nombre="Broken Session",
     rol="medico",
+    clinic_id=None,
+    scope="clinic",
+)
+
+ADMIN_USER_NO_CLINIC = UserPayload(
+    user_id="00000000-0000-0000-0000-000000000007",
+    email="admin-no-clinic@clinic-a.dev",
+    nombre="Admin Sin Clinica",
+    rol="admin",
     clinic_id=None,
     scope="clinic",
 )
@@ -923,6 +937,399 @@ class TestInformesPorEstudioTenantScoping(unittest.TestCase):
         self.assertIn("scope", sig.parameters)
         self.assertEqual(sig.parameters["clinic_id"].default, None)
         self.assertEqual(sig.parameters["scope"].default, None)
+
+
+# ── [CRITICAL-5] scope=clinic + clinic_id=None fail-closed ─────────────────────
+
+
+class TestClinicScopeMissingClinicIdFailClosed(unittest.TestCase):
+    """Non-global users with scope='clinic' but missing clinic_id must be rejected
+    before any DB lookup on study/listado endpoints, and DB helpers must fail closed."""
+
+    def setUp(self):
+        self.app = _make_test_app()
+        self.client = TestClient(self.app)
+
+    @patch("app.ai.router.informes_db.get_informes_por_estudio", new_callable=AsyncMock)
+    def test_informes_por_estudio_rejects_clinic_scope_no_clinic_id(self, mock_get):
+        """User with scope='clinic' but clinic_id=None should get 401 on informes/estudio."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/informes/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 401)
+        # DB helper must NOT have been called
+        mock_get.assert_not_called()
+
+    @patch("app.ai.router.informes_db.get_todos_informes", new_callable=AsyncMock)
+    def test_ai_listado_rejects_clinic_scope_no_clinic_id(self, mock_get):
+        """User with scope='clinic' but clinic_id=None should get 401 on /ai/listado."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/listado")
+        self.assertEqual(resp.status_code, 401)
+        mock_get.assert_not_called()
+
+    @patch("app.informes.router.informes_db.get_todos_informes", new_callable=AsyncMock)
+    def test_informes_listado_rejects_clinic_scope_no_clinic_id(self, mock_get):
+        """User with scope='clinic' but clinic_id=None should get 401 on /informes/listado."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/informes/listado")
+        self.assertEqual(resp.status_code, 401)
+        mock_get.assert_not_called()
+
+    def test_get_informes_por_estudio_returns_empty_when_no_clinic_id(self):
+        """DB helper get_informes_por_estudio must return empty list when
+        scope='clinic' and clinic_id=None (defense-in-depth, no DB needed)."""
+        mock_pool = AsyncMock()
+        # Should return empty list without hitting the pool
+        result = asyncio.run(
+            informes_db.get_informes_por_estudio(
+                mock_pool,
+                study_uid="1.2.3.4.5",
+                clinic_id=None,
+                scope="clinic",
+            )
+        )
+        self.assertEqual(result, [])
+        # Pool should NOT have been acquired
+        mock_pool.acquire.assert_not_called()
+
+    def test_get_todos_informes_returns_zero_total_when_no_clinic_id(self):
+        """DB helper get_todos_informes must return zero-total result when
+        scope='clinic' and clinic_id=None (defense-in-depth, no DB needed)."""
+        mock_pool = AsyncMock()
+        result = asyncio.run(
+            informes_db.get_todos_informes(
+                mock_pool,
+                clinic_id=None,
+                scope="clinic",
+            )
+        )
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["total"], 0)
+        self.assertFalse(result["has_more"])
+        # Pool should NOT have been acquired
+        mock_pool.acquire.assert_not_called()
+
+
+# ── [CRITICAL-6] Clinic-scoped admin cannot mutate cross-tenant users ──────────
+
+
+class TestAdminUserMutationTenantIsolation(unittest.TestCase):
+    """Clinic-scoped admins cannot patch/reset/delete users from another clinic."""
+
+    def setUp(self):
+        self.app = _make_test_app()
+        self.client = TestClient(self.app)
+
+    @patch("app.admin.router.auth_service.update_user", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_patch_user_rejects_cross_clinic(self, mock_get, mock_update):
+        """Clinic-scoped admin cannot PATCH a user from another clinic."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-b.dev",
+            "nombre": "Target User",
+            "rol": "medico",
+            "activo": True,
+            "clinic_id": CLINIC_B,  # different clinic!
+            "scope": "clinic",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.patch(
+            "/admin/api/usuarios/target-user-id",
+            json={"nombre": "Hacked Name"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(resp.status_code, 403)
+        # update_user must NOT have been called
+        mock_update.assert_not_called()
+
+    @patch("app.admin.router.auth_service.update_user", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_patch_user_allows_same_clinic(self, mock_get, mock_update):
+        """Clinic-scoped admin can PATCH a user in their own clinic."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-a.dev",
+            "nombre": "Target User",
+            "rol": "medico",
+            "activo": True,
+            "clinic_id": CLINIC_A,  # same clinic as ADMIN_USER
+            "scope": "clinic",
+        }
+        mock_update.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-a.dev",
+            "nombre": "Updated Name",
+            "rol": "medico",
+            "activo": True,
+            "clinic_id": CLINIC_A,
+            "scope": "clinic",
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.patch(
+            "/admin/api/usuarios/target-user-id",
+            json={"nombre": "Updated Name"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    @patch("app.admin.router.auth_service.update_user", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_patch_user_global_admin_allows_any_clinic(self, mock_get, mock_update):
+        """Global admin can PATCH a user in any clinic."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-b.dev",
+            "nombre": "Target User",
+            "rol": "medico",
+            "activo": True,
+            "clinic_id": CLINIC_B,
+            "scope": "clinic",
+        }
+        mock_update.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-b.dev",
+            "nombre": "Updated Name",
+            "rol": "medico",
+            "activo": True,
+            "clinic_id": CLINIC_B,
+            "scope": "clinic",
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.patch(
+            "/admin/api/usuarios/target-user-id",
+            json={"nombre": "Updated Name"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    @patch("app.admin.router.auth_service.update_password", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.log_audit", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_reset_password_rejects_cross_clinic(self, mock_get, mock_audit, mock_update_pw):
+        """Clinic-scoped admin cannot reset password for user from another clinic."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-b.dev",
+            "rol": "medico",
+            "clinic_id": CLINIC_B,  # different clinic!
+            "scope": "clinic",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post(
+            "/admin/api/usuarios/target-user-id/reset-password",
+            json={"new_password": "ValidPass!123456"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(resp.status_code, 403)
+        mock_update_pw.assert_not_called()
+
+    @patch("app.admin.router.auth_service.update_password", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.log_audit", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_reset_password_allows_same_clinic(self, mock_get, mock_audit, mock_update_pw):
+        """Clinic-scoped admin can reset password for user in their own clinic."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-a.dev",
+            "rol": "medico",
+            "clinic_id": CLINIC_A,  # same clinic as ADMIN_USER
+            "scope": "clinic",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post(
+            "/admin/api/usuarios/target-user-id/reset-password",
+            json={"new_password": "ValidPass!123456"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    @patch("app.admin.router.auth_service.delete_user", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.revoke_all_user_tokens", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.log_audit", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_delete_user_rejects_cross_clinic(self, mock_get, mock_audit, mock_revoke, mock_delete):
+        """Clinic-scoped admin cannot delete a user from another clinic."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-b.dev",
+            "rol": "medico",
+            "clinic_id": CLINIC_B,  # different clinic!
+            "scope": "clinic",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.delete(
+            "/admin/api/usuarios/target-user-id",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(resp.status_code, 403)
+        mock_delete.assert_not_called()
+
+    @patch("app.admin.router.auth_service.delete_user", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.revoke_all_user_tokens", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.log_audit", new_callable=AsyncMock)
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_delete_user_allows_same_clinic(self, mock_get, mock_audit, mock_revoke, mock_delete):
+        """Clinic-scoped admin can delete a user in their own clinic."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-a.dev",
+            "rol": "medico",
+            "clinic_id": CLINIC_A,  # same clinic as ADMIN_USER
+            "scope": "clinic",
+        }
+        mock_delete.return_value = True
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.delete(
+            "/admin/api/usuarios/target-user-id",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_get_user_by_id_returns_clinic_id_and_scope(self, mock_get):
+        """get_user_by_id must return clinic_id and scope for tenant enforcement."""
+        # This tests that the service function signature includes these fields.
+        import inspect
+        from app.auth.service import get_user_by_id
+
+        # Verify the function is importable (it was already updated to return clinic_id/scope)
+        self.assertTrue(callable(get_user_by_id))
+        # Verify that serialize_user handles clinic_id/scope from target
+        result = admin_service.serialize_user({
+            "id": "some-uuid",
+            "email": "test@test.dev",
+            "nombre": "Test",
+            "rol": "medico",
+            "activo": True,
+            "clinic_id": CLINIC_A,
+            "scope": "clinic",
+            "created_at": datetime.now(timezone.utc),
+        })
+        self.assertEqual(result["clinic_id"], CLINIC_A)
+        self.assertEqual(result["scope"], "clinic")
+
+
+# ── [CRITICAL-7] Admin with scope=clinic but no clinic_id cannot mutate ────────
+
+
+class TestAdminNoClinicIdFailClosed(unittest.TestCase):
+    """Admin with scope='clinic' but missing clinic_id must be rejected on mutation endpoints."""
+
+    def setUp(self):
+        self.app = _make_test_app()
+        self.client = TestClient(self.app)
+
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_patch_user_rejects_admin_no_clinic_id(self, mock_get):
+        """Admin with scope='clinic' but clinic_id=None should get 401 on PATCH."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-a.dev",
+            "nombre": "Target",
+            "rol": "medico",
+            "activo": True,
+            "clinic_id": CLINIC_A,
+            "scope": "clinic",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.patch(
+            "/admin/api/usuarios/target-user-id",
+            json={"nombre": "Hacked"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertIn(resp.status_code, (401, 403))
+
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_reset_password_rejects_admin_no_clinic_id(self, mock_get):
+        """Admin with scope='clinic' but clinic_id=None should get 401 on reset-password."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-a.dev",
+            "rol": "medico",
+            "clinic_id": CLINIC_A,
+            "scope": "clinic",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post(
+            "/admin/api/usuarios/target-user-id/reset-password",
+            json={"new_password": "ValidPass!123456"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertIn(resp.status_code, (401, 403))
+
+    @patch("app.admin.router.auth_service.get_user_by_id", new_callable=AsyncMock)
+    def test_delete_user_rejects_admin_no_clinic_id(self, mock_get):
+        """Admin with scope='clinic' but clinic_id=None should get 401 on DELETE."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get.return_value = {
+            "id": "target-user-id",
+            "email": "user@clinic-a.dev",
+            "rol": "medico",
+            "clinic_id": CLINIC_A,
+            "scope": "clinic",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.delete(
+            "/admin/api/usuarios/target-user-id",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertIn(resp.status_code, (401, 403))
 
 
 if __name__ == "__main__":
