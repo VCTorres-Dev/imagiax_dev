@@ -154,7 +154,7 @@ This means the bootstrap env var is either:
 ## 3. Data Leak Vectors — How Data Can Be Ambiguous Between Clinics
 
 ### Vector 1: Informe Listing Without Clinic Scoping (P0)
-- **Path**: `GET /listado` → `app/informes/router.py:listado_informes` 
+- **Path**: `GET /listado` → `app/informes/router.py:listado_informes`
 - **Mechanism**: Scoped by `usuario_id` only — no `clinic_id` filter
 - **Exploit**: Medico from Clinic A can't see Clinic B's informes directly (blocked by user_id), BUT if admin lists all without clinic filter, data from all clinics is mixed
 - **Severity**: HIGH — admin view mixes all clinic data
