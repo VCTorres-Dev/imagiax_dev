@@ -1839,5 +1839,288 @@ class TestAdminGlobalDashboardTenantIsolation(unittest.TestCase):
         mock_pagos.assert_not_called()
 
 
+# ── [CRITICAL-9] guardar_decision: report mutation is tenant-safe ────────────────
+
+
+class TestGuardarDecisionTenantIsolation(unittest.TestCase):
+    """guardar_decision /informes/guardar must be tenant-safe.
+
+    Vulnerability: clinic-scoped admin could mutate ANY report by UUID because:
+    1. _requiere_propiedad was None for admin roles
+    2. actualizar_decision used only WHERE id = $1::uuid (no clinic_id filter)
+
+    Fix: fail-closed on missing scope/clinic_id, look up report to verify
+    clinic_id matches, and pass clinic_id to DB helper for defense-in-depth.
+    """
+
+    # CSRF middleware requires Origin header on POST requests
+    _CSRF_HEADERS = {"Origin": "http://localhost:3000"}
+
+    def setUp(self):
+        self.app = _make_test_app()
+        self.client = TestClient(self.app)
+
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_rejects_missing_scope(self, mock_update):
+        """User with scope=None (old JWT) gets 401; mutation helper NOT called."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Reporte aceptado",
+        }, headers=self._CSRF_HEADERS)
+        self.assertEqual(resp.status_code, 401)
+        mock_update.assert_not_called()
+
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_rejects_clinic_scope_no_clinic_id(self, mock_update):
+        """User with scope=clinic but clinic_id=None gets 401; mutation helper NOT called."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Reporte aceptado",
+        }, headers=self._CSRF_HEADERS)
+        self.assertEqual(resp.status_code, 401)
+        mock_update.assert_not_called()
+
+    @patch("app.ai.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_rejects_cross_clinic_admin(self, mock_update, mock_get):
+        """Clinic A admin cannot mutate a Clinic B report — gets 404; helper NOT called."""
+        from app.auth.dependencies import get_current_user
+
+        # Report belongs to Clinic B
+        mock_get.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "clinic_id": CLINIC_B,
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Mutated from Clinic A",
+        }, headers=self._CSRF_HEADERS)
+        # 404 (opaque — no existence leak)
+        self.assertEqual(resp.status_code, 404)
+        # actualizar_decision must NOT have been called
+        mock_update.assert_not_called()
+
+    @patch("app.ai.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_allows_same_clinic_admin(self, mock_update, mock_get):
+        """Clinic A admin CAN mutate a Clinic A report."""
+        from app.auth.dependencies import get_current_user
+
+        # Report belongs to same clinic as ADMIN_USER
+        mock_get.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "clinic_id": CLINIC_A,
+        }
+        mock_update.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "study_instance_uid": "1.2.3.4.5",
+            "estado": "aceptado",
+            "fue_editado": False,
+            "timestamp_decision": "2026-01-01T00:00:00",
+            "informe_final": "Reporte aceptado",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Reporte aceptado",
+        }, headers=self._CSRF_HEADERS)
+        self.assertEqual(resp.status_code, 200)
+        # actualizar_decision MUST have been called with clinic_id
+        call_kwargs = mock_update.call_args[1]
+        self.assertEqual(call_kwargs.get("clinic_id"), CLINIC_A)
+
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_allows_global_superadmin(self, mock_update):
+        """Global superadmin can mutate any report — no clinic_id check."""
+        from app.auth.dependencies import get_current_user
+
+        mock_update.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "study_instance_uid": "1.2.3.4.5",
+            "estado": "aceptado",
+            "fue_editado": False,
+            "timestamp_decision": "2026-01-01T00:00:00",
+            "informe_final": "Reporte aceptado",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Reporte aceptado",
+        }, headers=self._CSRF_HEADERS)
+        self.assertEqual(resp.status_code, 200)
+        # Global admin: no clinic_id passed to DB (no restriction)
+        call_kwargs = mock_update.call_args[1]
+        self.assertIsNone(call_kwargs.get("clinic_id"))
+
+    @patch("app.ai.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_allows_same_clinic_medico_owner(self, mock_update, mock_get):
+        """Clinic-scoped medico (report owner) can mutate their own clinic's report."""
+        from app.auth.dependencies import get_current_user
+
+        # Report belongs to same clinic as CLINIC_USER
+        mock_get.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "clinic_id": CLINIC_A,
+        }
+        mock_update.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "study_instance_uid": "1.2.3.4.5",
+            "estado": "aceptado",
+            "fue_editado": False,
+            "timestamp_decision": "2026-01-01T00:00:00",
+            "informe_final": "Reporte aceptado",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Reporte aceptado",
+        }, headers=self._CSRF_HEADERS)
+        self.assertEqual(resp.status_code, 200)
+        # Medico: requiere_propiedad is set AND clinic_id is passed
+        call_kwargs = mock_update.call_args[1]
+        self.assertEqual(call_kwargs.get("clinic_id"), CLINIC_A)
+        self.assertEqual(call_kwargs.get("requiere_propiedad"), CLINIC_USER.user_id)
+
+    @patch("app.ai.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_rejects_cross_clinic_medico(self, mock_update, mock_get):
+        """Clinic A medico cannot mutate a Clinic B report — gets 404."""
+        from app.auth.dependencies import get_current_user
+
+        # Report belongs to Clinic B (different from CLINIC_USER's Clinic A)
+        mock_get.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "clinic_id": CLINIC_B,
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Mutated from Clinic A",
+        }, headers=self._CSRF_HEADERS)
+        self.assertEqual(resp.status_code, 404)
+        mock_update.assert_not_called()
+
+    @patch("app.ai.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_clinic_admin_null_clinic_id_on_report(self, mock_update, mock_get):
+        """When report has clinic_id=None (legacy row), clinic-scoped admin gets 404.
+
+        Defense-in-depth: even if a legacy report has no clinic_id set,
+        a clinic-scoped user cannot match it because their clinic_id != None.
+        """
+        from app.auth.dependencies import get_current_user
+
+        # Legacy report with clinic_id=None in DB
+        mock_get.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "clinic_id": None,
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Taking over legacy report",
+        }, headers=self._CSRF_HEADERS)
+        # Clinic-scoped admin must NOT match a NULL clinic_id report
+        self.assertEqual(resp.status_code, 404)
+        mock_update.assert_not_called()
+
+    @patch("app.ai.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    @patch("app.ai.router.informes_db.actualizar_decision", new_callable=AsyncMock)
+    def test_guardar_decision_global_superadmin_skips_lookup(self, mock_update, mock_get):
+        """Global superadmin should NOT need to look up report for tenant check."""
+        from app.auth.dependencies import get_current_user
+
+        mock_update.return_value = {
+            "id": "00000000-0000-0000-0000-000000000099",
+            "study_instance_uid": "1.2.3.4.5",
+            "estado": "aceptado",
+            "fue_editado": False,
+            "timestamp_decision": "2026-01-01T00:00:00",
+            "informe_final": "Reporte aceptado",
+        }
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/informes/guardar", json={
+            "informe_id": "00000000-0000-0000-0000-000000000099",
+            "estado": "aceptado",
+            "informe_final": "Reporte aceptado",
+        }, headers=self._CSRF_HEADERS)
+        self.assertEqual(resp.status_code, 200)
+        # Global user: get_informe_por_id should NOT be called (no tenant lookup needed)
+        mock_get.assert_not_called()
+
+
+class TestActualizarDecisionTenantDB(unittest.TestCase):
+    """Defense-in-depth: actualizar_decision DB helper includes clinic_id WHERE clause."""
+
+    def test_actualizar_decision_signature_includes_clinic_id(self):
+        """actualizar_decision must accept clinic_id parameter."""
+        import inspect
+        from app.informes.db import actualizar_decision
+
+        sig = inspect.signature(actualizar_decision)
+        self.assertIn("clinic_id", sig.parameters)
+        self.assertEqual(sig.parameters["clinic_id"].default, None)
+
+    def test_actualizar_decision_with_clinic_id_includes_where_clause(self):
+        """When clinic_id is provided, actualizar_decision SQL must include
+        'AND clinic_id' in the WHERE clause for defense-in-depth."""
+        import inspect
+        from app.informes.db import actualizar_decision
+
+        source = inspect.getsource(actualizar_decision)
+        # Must have at least two AND clinic_id references (owner+clinic and admin+clinic paths)
+        clinic_where_count = source.count("AND clinic_id = $")
+        self.assertGreaterEqual(
+            clinic_where_count, 2,
+            f"actualizar_decision must include 'AND clinic_id = $N' in WHERE clauses "
+            f"for defense-in-depth. Found {clinic_where_count} occurrences.",
+        )
+
+    def test_actualizar_decision_without_clinic_id_has_no_clinic_where(self):
+        """When clinic_id is None (global admin), the global path must exist
+        WITHOUT a clinic_id restriction in WHERE."""
+        import inspect
+        from app.informes.db import actualizar_decision
+
+        source = inspect.getsource(actualizar_decision)
+        # The global admin path (no owner check, no clinic filter) must have
+        # a branch with just WHERE id = $1::uuid (no AND clinic_id)
+        self.assertIn("WHERE id = $1::uuid\n", source)
+
+
 if __name__ == "__main__":
     unittest.main()

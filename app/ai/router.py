@@ -1936,11 +1936,51 @@ async def guardar_decision(
     pool: asyncpg.Pool = Depends(get_db_pool),
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
-    """Record the physician's final decision on a report."""
+    """Record the physician's final decision on a report.
+
+    Tenant isolation:
+      - scope=None → 401 (old JWT, missing tenant context)
+      - scope=clinic without clinic_id → 401 (broken session)
+      - scope=clinic: verify report's clinic_id matches user's clinic_id
+      - scope=global: no clinic restriction (superadmin)
+    """
+    # ── Tenant fail-closed: reject before any mutation ──────────────────────
+    if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+
+    # ── Tenant isolation: clinic-scoped users can only mutate own clinic's reports ──
+    if current_user.scope != "global":
+        existing = await informes_db.get_informe_por_id(pool, body.informe_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontró informe con ID: {body.informe_id}",
+            )
+        if existing.get("clinic_id") != current_user.clinic_id:
+            # Opaque 404 — no existence leak across tenants
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontró informe con ID: {body.informe_id}",
+            )
+
     # SEC-IDOR: non-admin users can only update reports they own
     _requiere_propiedad: str | None = None
     if current_user.rol not in ("admin", "superadmin"):
         _requiere_propiedad = current_user.user_id
+
+    # Defense-in-depth: pass clinic_id to DB mutation for non-global users
+    _clinic_id_for_db: str | None = None
+    if current_user.scope != "global":
+        _clinic_id_for_db = current_user.clinic_id
+
     try:
         updated = await informes_db.actualizar_decision(
             pool,
@@ -1951,6 +1991,7 @@ async def guardar_decision(
             decision_usuario_id=current_user.user_id,
             decision_usuario_email=current_user.email,
             requiere_propiedad=_requiere_propiedad,
+            clinic_id=_clinic_id_for_db,
         )
     except Exception as exc:
         logger.exception("Error updating decision for informe_id=%s", body.informe_id)

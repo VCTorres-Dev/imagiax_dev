@@ -269,61 +269,127 @@ async def actualizar_decision(
     decision_usuario_id: str | None = None,
     decision_usuario_email: str | None = None,
     requiere_propiedad: str | None = None,
+    clinic_id: str | None = None,
 ) -> dict | None:
-    """Actualiza decision medica. requiere_propiedad filtra por propietario."""
+    """Actualiza decision medica. requiere_propiedad filtra por propietario.
+
+    Tenant isolation: when clinic_id is provided (non-global scope), the UPDATE
+    includes ``AND clinic_id = $N`` as a defense-in-depth WHERE clause so that
+    a clinic-scoped admin cannot mutate a cross-tenant report even if the router
+    check is bypassed.
+    """
     fue_editado = estado == "editado_aceptado"
     _uid = uuid.UUID(decision_usuario_id) if decision_usuario_id else None
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id else None
+
     async with pool.acquire() as conn:
         if requiere_propiedad:
             _owner_uid = uuid.UUID(requiere_propiedad)
-            row = await conn.fetchrow(
-                """
-                UPDATE informes
-                SET
-                    estado                 = $2,
-                    informe_final          = $3,
-                    fue_editado            = $4,
-                    notas_rechazo          = $5,
-                    decision_usuario_id    = $6,
-                    decision_usuario_email = $7,
-                    timestamp_decision     = NOW()
-                WHERE id = $1::uuid AND usuario_id = $8
-                RETURNING id, study_instance_uid, estado, fue_editado,
-                          timestamp_decision, informe_final
-                """,
-                informe_id,
-                estado,
-                informe_final,
-                fue_editado,
-                notas_rechazo,
-                _uid,
-                decision_usuario_email,
-                _owner_uid,
-            )
+            if _clinic_uuid:
+                # Owner check + clinic scope (defense-in-depth)
+                row = await conn.fetchrow(
+                    """
+                    UPDATE informes
+                    SET
+                        estado                 = $2,
+                        informe_final          = $3,
+                        fue_editado            = $4,
+                        notas_rechazo          = $5,
+                        decision_usuario_id    = $6,
+                        decision_usuario_email = $7,
+                        timestamp_decision     = NOW()
+                    WHERE id = $1::uuid AND usuario_id = $8 AND clinic_id = $9
+                    RETURNING id, study_instance_uid, estado, fue_editado,
+                              timestamp_decision, informe_final
+                    """,
+                    informe_id,
+                    estado,
+                    informe_final,
+                    fue_editado,
+                    notas_rechazo,
+                    _uid,
+                    decision_usuario_email,
+                    _owner_uid,
+                    _clinic_uuid,
+                )
+            else:
+                # Owner check only (global scope)
+                row = await conn.fetchrow(
+                    """
+                    UPDATE informes
+                    SET
+                        estado                 = $2,
+                        informe_final          = $3,
+                        fue_editado            = $4,
+                        notas_rechazo          = $5,
+                        decision_usuario_id    = $6,
+                        decision_usuario_email = $7,
+                        timestamp_decision     = NOW()
+                    WHERE id = $1::uuid AND usuario_id = $8
+                    RETURNING id, study_instance_uid, estado, fue_editado,
+                              timestamp_decision, informe_final
+                    """,
+                    informe_id,
+                    estado,
+                    informe_final,
+                    fue_editado,
+                    notas_rechazo,
+                    _uid,
+                    decision_usuario_email,
+                    _owner_uid,
+                )
         else:
-            row = await conn.fetchrow(
-                """
-                UPDATE informes
-                SET
-                    estado                 = $2,
-                    informe_final          = $3,
-                    fue_editado            = $4,
-                    notas_rechazo          = $5,
-                    decision_usuario_id    = $6,
-                    decision_usuario_email = $7,
-                    timestamp_decision     = NOW()
-                WHERE id = $1::uuid
-                RETURNING id, study_instance_uid, estado, fue_editado,
-                          timestamp_decision, informe_final
-                """,
-                informe_id,
-                estado,
-                informe_final,
-                fue_editado,
-                notas_rechazo,
-                _uid,
-                decision_usuario_email,
-            )
+            if _clinic_uuid:
+                # Admin without owner check, but clinic-scoped (defense-in-depth)
+                row = await conn.fetchrow(
+                    """
+                    UPDATE informes
+                    SET
+                        estado                 = $2,
+                        informe_final          = $3,
+                        fue_editado            = $4,
+                        notas_rechazo          = $5,
+                        decision_usuario_id    = $6,
+                        decision_usuario_email = $7,
+                        timestamp_decision     = NOW()
+                    WHERE id = $1::uuid AND clinic_id = $8
+                    RETURNING id, study_instance_uid, estado, fue_editado,
+                              timestamp_decision, informe_final
+                    """,
+                    informe_id,
+                    estado,
+                    informe_final,
+                    fue_editado,
+                    notas_rechazo,
+                    _uid,
+                    decision_usuario_email,
+                    _clinic_uuid,
+                )
+            else:
+                # Global admin without clinic restriction
+                row = await conn.fetchrow(
+                    """
+                    UPDATE informes
+                    SET
+                        estado                 = $2,
+                        informe_final          = $3,
+                        fue_editado            = $4,
+                        notas_rechazo          = $5,
+                        decision_usuario_id    = $6,
+                        decision_usuario_email = $7,
+                        timestamp_decision     = NOW()
+                    WHERE id = $1::uuid
+                    RETURNING id, study_instance_uid, estado, fue_editado,
+                              timestamp_decision, informe_final
+                    """,
+                    informe_id,
+                    estado,
+                    informe_final,
+                    fue_editado,
+                    notas_rechazo,
+                    _uid,
+                    decision_usuario_email,
+                )
     return _row_to_dict(row) if row else None
 
 
