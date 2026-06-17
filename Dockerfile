@@ -31,8 +31,11 @@ RUN pip install --no-cache-dir --prefix=/install \
     torchvision==0.21.0 \
     --index-url https://download.pytorch.org/whl/cpu
 
-# Resto de dependencias (lee requirements.txt)
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Resto de dependencias (lee requirements.txt).
+# PYTHONPATH permite que pip vea el torch CPU instalado en /install en el paso anterior;
+# sin esto, dependencias como torchxrayvision pueden intentar descargar otro torch GPU enorme.
+RUN PYTHONPATH=/install/lib/python3.11/site-packages \
+    pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 FROM python:3.11-slim
