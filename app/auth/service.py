@@ -528,9 +528,28 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
             await conn.execute(
                 "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID"
             )
+            # Soft-dedup columns for production remediation of historical terminal duplicates.
+            # See migrations/005_tenant_remediation_schema.sql for production context.
+            await conn.execute(
+                "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS deduped_at TIMESTAMPTZ"
+            )
+            await conn.execute(
+                "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS deduped_into_job_id UUID "
+                "REFERENCES analysis_jobs(id)"
+            )
+            await conn.execute(
+                "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS deduped_reason TEXT"
+            )
+            # PARTIAL unique index: only enforces uniqueness on non-deduped rows.
+            # Production has 5 historical terminal-duplicate groups (41 rows, 0 active).
+            # A total unique index would fail on production. This partial index, combined
+            # with the existing idx_analysis_jobs_pending_dedup, provides full coverage:
+            # - pending/running dedup: idx_analysis_jobs_pending_dedup (existing)
+            # - all non-deduped:       analysis_jobs_study_user_clinic_uniq (this index)
             await conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS analysis_jobs_study_user_clinic_uniq "
-                "ON analysis_jobs (study_instance_uid, usuario_id, clinic_id)"
+                "ON analysis_jobs (study_instance_uid, usuario_id, clinic_id) "
+                "WHERE deduped_at IS NULL"
             )
         else:
             logger.info("IMAGIAX Auth: analysis_jobs not yet created — clinic_id ALTER skipped.")
