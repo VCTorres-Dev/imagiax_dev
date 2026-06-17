@@ -109,9 +109,22 @@ router = APIRouter(tags=["ai"])
 async def abrir_estudio_viewer(
     short_id: str,
     pool: asyncpg.Pool = Depends(get_db_pool),
+    current_user: UserPayload = Depends(get_current_user),
 ) -> RedirectResponse:
-    """URL limpia → redirect al viewer OHIF con StudyInstanceUIDs."""
-    data = await informes_db.get_study_by_short_id(pool, short_id)
+    """URL limpia → redirect al viewer OHIF con StudyInstanceUIDs.
+
+    Requires authentication and valid tenant context. Cross-clinic short_ids
+    return 404 (no existence leak).
+    """
+    if current_user.scope is None:
+        raise HTTPException(status_code=401, detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.")
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(status_code=401, detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.")
+    data = await informes_db.get_study_by_short_id(
+        pool, short_id,
+        clinic_id=current_user.clinic_id,
+        scope=current_user.scope,
+    )
     if not data:
         raise HTTPException(status_code=404, detail="Estudio no encontrado")
     uid = data["study_instance_uid"]
@@ -1145,15 +1158,30 @@ async def generar_informe(
 ) -> JSONResponse:
     """
     Full pipeline:
-      0) Deduplication check
-      1) Payment/credits verification
-      2) AI analysis of DICOM study
-      3) LLM report generation via Gemini Vision
-      4) Charge / credit deduction
-      5) Persist report + billing state to PostgreSQL
-      6) Return report (always — even on billing failure)
+      0) Tenant fail-closed check
+      1) Deduplication check
+      2) Payment/credits verification
+      3) AI analysis of DICOM study
+      4) LLM report generation via Gemini Vision
+      5) Charge / credit deduction
+      6) Persist report + billing state to PostgreSQL
+      7) Return report (always — even on billing failure)
     """
     orthanc = _get_orthanc_client(request)
+
+    # ── Tenant fail-closed: reject before any persistence ──────────────────────
+    # Old JWTs without clinic/scope claims MUST NOT create PHI rows with clinic_id=NULL.
+    # Clinic-scoped users without clinic_id are also rejected (session data incomplete).
+    if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
 
     # ── v1.1: Resolve pipeline version (must be before dedup check) ──────────
     # Per-request override takes precedence; falls back to global settings default.
@@ -1839,6 +1867,8 @@ async def generar_informe(
             pipeline_version="1.1" if _use_v11 else "1.0",
             pipeline_trace=_pipeline_ctx.to_trace_dict() if _pipeline_ctx else None,
             patient_age=patient_age,
+            # ── Tenant: persist clinic_id for PHI isolation ────────────────────
+            clinic_id=current_user.clinic_id,
         )
     except Exception as exc:
         logger.exception(
@@ -1952,7 +1982,20 @@ async def informes_por_estudio(
     pool: asyncpg.Pool = Depends(get_db_pool),
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
-    """Return all reports for a study, newest first."""
+    """Return all reports for a study, newest first. Tenant-scoped."""
+    # Tenant fail-closed: missing tenant context means re-login required
+    if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    # Tenant filter: clinic-scoped users only see their own clinic's reports
+    _clinic_filter = current_user.clinic_id if current_user.scope != "global" else None
     usuario_id_filtro = (
         None
         if current_user.rol in ("admin", "superadmin")
@@ -1960,8 +2003,11 @@ async def informes_por_estudio(
     )
     try:
         informes = await informes_db.get_informes_por_estudio(
-            pool, study_instance_uid, usuario_id=usuario_id_filtro
+            pool, study_instance_uid, usuario_id=usuario_id_filtro,
+            clinic_id=_clinic_filter, scope=current_user.scope,
         )
+    except HTTPException:
+        raise  # BUG FIX: re-raise before generic catch
     except Exception as exc:
         logger.exception("Error fetching reports for study_uid=%s", study_instance_uid)
         raise HTTPException(
@@ -1988,20 +2034,42 @@ async def listado_informes(
     pool: asyncpg.Pool = Depends(get_db_pool),
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
-    """Paginated report listing scoped by role."""
-    try:
-        _scope_uid = (
-            None
-            if current_user.rol in ("admin", "superadmin")
-            else current_user.user_id
+    """Paginated report listing scoped by role and tenant.
+
+    Tenant scoping: scope=None → 401 (re-login required).
+    Clinic-scoped users see only their clinic's reports; global sees all.
+    """
+    # Tenant fail-closed: missing tenant context means re-login required
+    if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
         )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+
+    _scope_uid = (
+        None
+        if current_user.rol in ("admin", "superadmin")
+        else current_user.user_id
+    )
+    _clinic_id = current_user.clinic_id if current_user.scope != "global" else None
+
+    try:
         result = await informes_db.get_todos_informes(
             pool,
             estado=estado,
             usuario_id=_scope_uid,
             limit=limit,
             offset=offset,
+            clinic_id=_clinic_id,
+            scope=current_user.scope,
         )
+    except HTTPException:
+        raise  # BUG FIX: re-raise HTTPException before generic catch prevents 401→500 wrap
     except Exception as exc:
         logger.exception("Error fetching report listing")
         raise HTTPException(

@@ -146,15 +146,20 @@ async def guardar_informe(
     pipeline_trace: dict | None = None,
     # ── BUG-008: patient demographic fields ────────────────────────────────────────────
     patient_age: str | None = None,
+    # ── Tenant: clinic_id for PHI isolation ─────────────────────────────────────
+    clinic_id: str | None = None,
 ) -> tuple[str, str]:
     """Inserta informe. Retorna (informe_uuid, short_id).
 
     v1.1 fields (nota_clinica, quality_gate_result, audit_result,
     pipeline_version, pipeline_trace) are all optional with None defaults
     so existing v1 callers remain unaffected.
+
+    clinic_id is persisted on every informe for tenant isolation.
     """
     _uid = uuid.UUID(usuario_id) if usuario_id else None
     _short_id = short_id or generate_short_id()
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id else None
     async with pool.acquire() as conn:
         for _attempt in range(5):
             try:
@@ -171,7 +176,8 @@ async def guardar_informe(
                         exam_region, exam_modality, exam_confidence, classification_source,
                         nota_clinica, quality_gate_result, audit_result,
                         pipeline_version, pipeline_trace,
-                        patient_age
+                        patient_age,
+                        clinic_id
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10,
                         $11, $12,
@@ -179,7 +185,8 @@ async def guardar_informe(
                         CASE WHEN $13 IN ('pagado', 'fallido') THEN NOW() ELSE NULL END,
                         $18, $19, $20, $21, $22,
                         $23, $24::jsonb, $25::jsonb, $26, $27::jsonb,
-                        $28
+                        $28,
+                        $29
                     )
                     RETURNING id, short_id
                     """,
@@ -211,6 +218,7 @@ async def guardar_informe(
                     pipeline_version,
                     json.dumps(pipeline_trace, ensure_ascii=False) if pipeline_trace is not None else None,
                     patient_age,
+                    _clinic_uuid,
                 )
                 return str(row["id"]), row["short_id"]
             except asyncpg.UniqueViolationError:
@@ -323,10 +331,44 @@ async def get_informes_por_estudio(
     pool: asyncpg.Pool,
     study_uid: str,
     usuario_id: str | None = None,
+    clinic_id: str | None = None,
+    scope: str | None = None,
 ) -> list[dict]:
-    """Retorna informes de un estudio."""
+    """Retorna informes de un estudio. Optionally filtered by tenant clinic_id.
+
+    Tenant scoping:
+    - When scope="global", no clinic_id filter is applied.
+    - When scope is not "global" and clinic_id is provided, results are filtered
+      by clinic_id so clinic-scoped users only see their own clinic's reports.
+    - Defense-in-depth: when scope is not "global" and clinic_id is None,
+      returns empty list (fail-closed — never run an unscoped query).
+    """
+    # Defense-in-depth: non-global scope without clinic_id must return no rows
+    if scope and scope != "global" and not clinic_id:
+        return []
+
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id and scope != "global" else None
     async with pool.acquire() as conn:
-        if usuario_id:
+        if usuario_id and _clinic_uuid:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    id, study_instance_uid, patient_id, patient_name,
+                    study_date, modalidad, ai_nivel_alerta,
+                    ai_hallazgos, ai_todas_patologias,
+                    informe_generado, informe_final, modelo_llm,
+                    estado, fue_editado, notas_rechazo,
+                    usuario_id, usuario_email,
+                    timestamp_decision, created_at, patient_age
+                FROM informes
+                WHERE study_instance_uid = $1 AND usuario_id = $2 AND clinic_id = $3
+                ORDER BY created_at DESC
+                """,
+                study_uid,
+                uuid.UUID(usuario_id),
+                _clinic_uuid,
+            )
+        elif usuario_id:
             rows = await conn.fetch(
                 """
                 SELECT
@@ -343,6 +385,24 @@ async def get_informes_por_estudio(
                 """,
                 study_uid,
                 uuid.UUID(usuario_id),
+            )
+        elif _clinic_uuid:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    id, study_instance_uid, patient_id, patient_name,
+                    study_date, modalidad, ai_nivel_alerta,
+                    ai_hallazgos, ai_todas_patologias,
+                    informe_generado, informe_final, modelo_llm,
+                    estado, fue_editado, notas_rechazo,
+                    usuario_id, usuario_email,
+                    timestamp_decision, created_at, patient_age
+                FROM informes
+                WHERE study_instance_uid = $1 AND clinic_id = $2
+                ORDER BY created_at DESC
+                """,
+                study_uid,
+                _clinic_uuid,
             )
         else:
             rows = await conn.fetch(
@@ -368,7 +428,7 @@ async def get_informe_por_id(
     pool: asyncpg.Pool,
     informe_id: str,
 ) -> dict | None:
-    """Retorna un informe por UUID."""
+    """Retorna un informe por UUID. Includes clinic_id for tenant scoping at router level."""
     try:
         uid = uuid.UUID(informe_id)
     except ValueError:
@@ -381,7 +441,7 @@ async def get_informe_por_id(
                 study_date, modalidad, ai_nivel_alerta,
                 ai_hallazgos, informe_generado, informe_final,
                 modelo_llm, estado, fue_editado, created_at, usuario_id, usuario_email,
-                patient_age, nota_clinica, short_id
+                patient_age, nota_clinica, short_id, clinic_id
             FROM informes
             WHERE id = $1
             """,
@@ -397,6 +457,8 @@ async def get_todos_informes(
     limit: int = 100,
     offset: int = 0,
     cursor_id: str | None = None,
+    clinic_id: str | None = None,
+    scope: str | None = None,
 ) -> dict:
     """Retorna informes paginados con filtros opcionales.
 
@@ -407,12 +469,32 @@ async def get_todos_informes(
       Faster for deep pages — uses a keyset filter instead of OFFSET.
       Preferred for API consumers that do infinite scroll / load-more.
 
+    Tenant scoping:
+    - When scope="global", no clinic_id filter is applied (superadmin sees all).
+    - When scope is not "global" and clinic_id is provided, results are filtered
+      by clinic_id so clinic-scoped users only see their own clinic's informes.
+    - Defense-in-depth: when scope is not "global" and clinic_id is None,
+      returns zero-total result (fail-closed — never run an unscoped query).
+
     P4-FIX: Uses COUNT(*) OVER() window function to get total in the same query
     instead of a separate COUNT query (2 round-trips → 1).
     Also uses NULL-coalescing WHERE pattern to avoid f-string SQL (W4 pattern).
     """
+    # Defense-in-depth: non-global scope without clinic_id must return no rows
+    if scope and scope != "global" and not clinic_id:
+        return {
+            "items": [],
+            "total": 0,
+            "limit": min(limit, 500),
+            "offset": offset,
+            "has_more": False,
+            "next_cursor": None,
+        }
+
     limit = min(limit, 500)
     _uid = uuid.UUID(usuario_id) if usuario_id else None
+    # Tenant clinic filter: only apply when scope is not "global"
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id and scope != "global" else None
 
     async with pool.acquire() as conn:
         if cursor_id is not None:
@@ -427,10 +509,11 @@ async def get_todos_informes(
                        modelo_llm, estado, fue_editado, notas_rechazo, usuario_id, usuario_email,
                        cobro_estado, cobro_metodo, cobro_monto_clp, cobro_ref_id,
                        timestamp_decision, created_at, created_at AS timestamp_creacion, patient_age,
-                       nota_clinica, short_id
+                       nota_clinica, short_id, clinic_id
                 FROM informes
                 WHERE ($1::text IS NULL OR estado = $1)
                   AND ($2::uuid IS NULL OR usuario_id = $2)
+                  AND ($5::uuid IS NULL OR clinic_id = $5)
                   AND id < $3
                 ORDER BY created_at DESC, id DESC
                 LIMIT $4
@@ -439,6 +522,7 @@ async def get_todos_informes(
                 _uid,
                 _cursor_uuid,
                 limit,
+                _clinic_uuid,
             )
             items = [_row_to_dict(r) for r in rows]
             next_cursor = str(rows[-1]["id"]) if len(rows) == limit else None
@@ -459,11 +543,12 @@ async def get_todos_informes(
                        modelo_llm, estado, fue_editado, notas_rechazo, usuario_id, usuario_email,
                        cobro_estado, cobro_metodo, cobro_monto_clp, cobro_ref_id,
                        timestamp_decision, created_at, created_at AS timestamp_creacion, patient_age,
-                       nota_clinica, short_id,
+                       nota_clinica, short_id, clinic_id,
                        COUNT(*) OVER() AS _total_count
                 FROM informes
                 WHERE ($1::text IS NULL OR estado = $1)
                   AND ($2::uuid IS NULL OR usuario_id = $2)
+                  AND ($5::uuid IS NULL OR clinic_id = $5)
                 ORDER BY created_at DESC
                 LIMIT $3 OFFSET $4
                 """,
@@ -471,6 +556,7 @@ async def get_todos_informes(
                 _uid,
                 limit,
                 offset,
+                _clinic_uuid,
             )
         total = rows[0]["_total_count"] if rows else 0
         items = [{k: v for k, v in _row_to_dict(r).items() if k != "_total_count"} for r in rows]
@@ -487,19 +573,42 @@ async def get_todos_informes(
 async def get_study_by_short_id(
     pool: asyncpg.Pool,
     short_id: str,
+    clinic_id: str | None = None,
+    scope: str | None = None,
 ) -> dict | None:
-    """Busca informe por short_id."""
+    """Busca informe por short_id. Optionally filtered by tenant clinic_id.
+
+    Tenant scoping:
+    - When scope="global", no clinic_id filter is applied.
+    - When scope is not "global" and clinic_id is provided, results are filtered
+      by clinic_id so clinic-scoped users only see their own clinic's reports.
+    - Defense-in-depth: when scope is not "global" and clinic_id is None,
+      returns None (fail-closed — never run an unscoped query).
+    """
+    # Defense-in-depth: non-global scope without clinic_id must return None
+    if scope and scope != "global" and not clinic_id:
+        return None
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id and scope != "global" else None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, study_instance_uid FROM informes WHERE short_id = $1",
+            """
+            SELECT id, study_instance_uid, clinic_id
+            FROM informes
+            WHERE short_id = $1
+              AND ($2::uuid IS NULL OR clinic_id = $2)
+            """,
             short_id,
+            _clinic_uuid,
         )
     if row is None:
         return None
-    return {
+    result = {
         "informe_id": str(row["id"]),
         "study_instance_uid": row["study_instance_uid"],
     }
+    if row["clinic_id"] is not None:
+        result["clinic_id"] = str(row["clinic_id"])
+    return result
 
 
 async def get_pipeline_trace(
@@ -579,6 +688,7 @@ async def create_branding_tables(pool: asyncpg.Pool) -> None:
                 logo_b64          TEXT,
                 signature_b64     TEXT,
                 activo            BOOLEAN NOT NULL DEFAULT TRUE,
+                clinic_id         UUID,
                 created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(usuario_id)
@@ -588,28 +698,37 @@ async def create_branding_tables(pool: asyncpg.Pool) -> None:
             "CREATE INDEX IF NOT EXISTS idx_branding_config_usuario "
             "ON branding_config (usuario_id)"
         )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_branding_config_clinic_id "
+            "ON branding_config (clinic_id)"
+        )
     logger.info("IMAGIAX Branding: branding_config table ensured.")
 
 
 async def get_branding_for_user(
     pool: asyncpg.Pool,
     usuario_id: str,
+    clinic_id: str | None = None,
 ) -> dict | None:
     """Get branding config for an authenticated user.
 
-    Returns the active branding row, or None if no config exists.
+    When clinic_id is provided, also matches on clinic_id for clinic-scoped
+    branding isolation. Returns the active branding row, or None if no config exists.
     Only returns rows where activo=TRUE.
     """
     _uid = uuid.UUID(usuario_id)
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id else None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT brand_name, brand_subtitle, doctor_name, doctor_specialty,
-                   doctor_license, logo_b64, signature_b64, activo
+                   doctor_license, logo_b64, signature_b64, activo, clinic_id
             FROM branding_config
             WHERE usuario_id = $1 AND activo = TRUE
+              AND ($2::uuid IS NULL OR clinic_id = $2)
             """,
             _uid,
+            _clinic_uuid,
         )
     return _row_to_dict(row) if row else None
 
@@ -625,23 +744,27 @@ async def save_branding_config(
     doctor_license: str | None = None,
     logo_b64: str | None = None,
     signature_b64: str | None = None,
+    clinic_id: str | None = None,
 ) -> dict:
     """Upsert branding config for a user.
 
     INSERT ON CONFLICT (usuario_id) DO UPDATE — if a row already exists,
     only non-None fields are updated (via COALESCE); None fields keep
     their existing values. The row is always set to activo=TRUE on upsert.
+
+    clinic_id is persisted for clinic-scoped branding isolation.
     """
     _uid = uuid.UUID(usuario_id)
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id else None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO branding_config (
                 usuario_id, brand_name, brand_subtitle,
                 doctor_name, doctor_specialty, doctor_license,
-                logo_b64, signature_b64, activo
+                logo_b64, signature_b64, activo, clinic_id
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, TRUE
+                $1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9
             )
             ON CONFLICT (usuario_id) DO UPDATE SET
                 brand_name       = COALESCE(EXCLUDED.brand_name, branding_config.brand_name),
@@ -651,10 +774,11 @@ async def save_branding_config(
                 doctor_license   = COALESCE(EXCLUDED.doctor_license, branding_config.doctor_license),
                 logo_b64         = COALESCE(EXCLUDED.logo_b64, branding_config.logo_b64),
                 signature_b64    = COALESCE(EXCLUDED.signature_b64, branding_config.signature_b64),
+                clinic_id        = COALESCE(EXCLUDED.clinic_id, branding_config.clinic_id),
                 activo           = TRUE,
                 updated_at       = NOW()
             RETURNING id, brand_name, brand_subtitle, doctor_name, doctor_specialty,
-                      doctor_license, logo_b64, signature_b64, activo
+                      doctor_license, logo_b64, signature_b64, activo, clinic_id
             """,
             _uid,
             brand_name,
@@ -664,6 +788,7 @@ async def save_branding_config(
             doctor_license,
             logo_b64,
             signature_b64,
+            _clinic_uuid,
         )
     return _row_to_dict(row)
 
@@ -673,6 +798,7 @@ async def set_branding_active(
     *,
     usuario_id: str,
     activo: bool,
+    clinic_id: str | None = None,
 ) -> dict | None:
     """Toggle the activo flag on a user's branding config row.
 
@@ -680,16 +806,19 @@ async def set_branding_active(
     Returns the updated row, or None if no branding config exists for the user.
     """
     _uid = uuid.UUID(usuario_id)
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id else None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             UPDATE branding_config
             SET activo = $2, updated_at = NOW()
             WHERE usuario_id = $1
+              AND ($3::uuid IS NULL OR clinic_id = $3)
             RETURNING id, brand_name, brand_subtitle, doctor_name, doctor_specialty,
-                      doctor_license, logo_b64, signature_b64, activo
+                      doctor_license, logo_b64, signature_b64, activo, clinic_id
             """,
             _uid,
             activo,
+            _clinic_uuid,
         )
     return _row_to_dict(row) if row else None

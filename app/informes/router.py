@@ -21,7 +21,7 @@ import html as _html
 import logging
 
 import asyncpg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.auth.dependencies import get_current_user
@@ -139,10 +139,22 @@ async def ver_informe(
     """Report verification page.
 
     Requires medico, admin, or superadmin role (SEC-BE-006).
+    Tenant scoping: scope=None → 401 (missing tenant context).
+    Cross-clinic access denied with opaque 403 (no existence leak).
     Medicos can only view their own reports (IDOR guard, H-005).
+
+    Execution order: role check → tenant check → DB fetch → 404 → clinic scope → IDOR → render.
+    The informe is fetched BEFORE clinic scoping so the variable is always assigned.
     """
     if user.rol not in ("medico", "admin", "superadmin"):
         return HTMLResponse("Acceso denegado", status_code=403)
+
+    # Tenant fail-closed: missing tenant context means re-login required
+    if user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
 
     try:
         informe = await informes_db.get_informe_por_id(pool, informe_id)
@@ -151,6 +163,13 @@ async def ver_informe(
 
     if not informe:
         return HTMLResponse(_NOT_FOUND_HTML, status_code=404)
+
+    # Tenant scoping: clinic-scoped users can only access their own clinic's informes
+    if user.scope != "global":
+        informe_clinic = str(informe.get("clinic_id") or "")
+        if informe_clinic != str(user.clinic_id or ""):
+            # Opaque 403 — do not reveal whether the informe exists
+            return HTMLResponse("Acceso denegado", status_code=403)
 
     # H-005: IDOR check — medico can only view own reports
     if user.rol == "medico":
@@ -177,29 +196,48 @@ async def listado_informes(
     pool: asyncpg.Pool = Depends(get_db_pool),
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
-    """Paginated report listing.
+    """Paginated report listing with tenant scoping.
 
+    Tenant scoping: scope=None → 401 (re-login required).
+    Clinic-scoped users see only their clinic's reports; global sees all.
     Medicos only see their own reports; admins and superadmins see all (C-004).
 
     Returns:
         items, total, limit, offset, has_more, filtro_estado
     """
-    try:
-        _scope_uid = (
-            None
-            if current_user.rol in ("admin", "superadmin")
-            else current_user.user_id
+    # Tenant fail-closed: missing tenant context means re-login required
+    if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
         )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+
+    _scope_uid = (
+        None
+        if current_user.rol in ("admin", "superadmin")
+        else current_user.user_id
+    )
+    _clinic_id = current_user.clinic_id if current_user.scope != "global" else None
+
+    try:
         result = await informes_db.get_todos_informes(
             pool,
             estado=estado,
             usuario_id=_scope_uid,
             limit=limit,
             offset=offset,
+            clinic_id=_clinic_id,
+            scope=current_user.scope,
         )
+    except HTTPException:
+        raise  # BUG FIX: re-raise HTTPException before generic catch prevents 401→500 wrap
     except Exception as exc:
         logger.exception("Error fetching report listing")
-        from fastapi import HTTPException
         raise HTTPException(
             status_code=500, detail="Error interno del servidor. Intente nuevamente."
         ) from exc

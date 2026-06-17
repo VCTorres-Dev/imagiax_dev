@@ -66,7 +66,39 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         logger.warning("IMAGIAX Auth: bootstrap admin check failed.", exc_info=exc)
 
-    # 3c) Ensure patient_age column exists (BUG-008 migration)
+    # 3c-tenant) Idempotent tenant column migrations + backfill
+    try:
+        from app.auth.service import backfill_tenant_columns, validate_tenant_null_counts
+        backfill_result = await backfill_tenant_columns(app.state.pool)
+        null_counts = await validate_tenant_null_counts(app.state.pool)
+        logger.info("IMAGIAX Auth: tenant backfill complete — %s", backfill_result)
+        if any(v > 0 for v in null_counts.values()):
+            logger.warning(
+                "IMAGIAX Auth: NULL tenant rows detected — %s. "
+                "Constraints should NOT be added until these are zero.",
+                null_counts,
+            )
+        else:
+            logger.info("IMAGIAX Auth: tenant validation PASS — zero NULL rows.")
+    except Exception as exc:
+        logger.warning("IMAGIAX Auth: tenant backfill/validation failed.", exc_info=exc)
+
+    # 3d) Bootstrap mode gate — production rejects, development warns
+    if settings.APP_ENV == "production" and settings.bootstrap_mode:
+        # This should already be prevented by the Settings validator, but
+        # we guard here as a runtime safety net.
+        raise RuntimeError(
+            "IMAGIAX_BOOTSTRAP_MODE=1 is not permitted in production. "
+            "Refusing to start. Set IMAGIAX_BOOTSTRAP_MODE=0 to continue."
+        )
+    if settings.bootstrap_mode:
+        logger.warning(
+            "IMAGIAX Auth: BOOTSTRAP MODE ENABLED — tenant checks are relaxed. "
+            "This is intended for initial setup only. Set IMAGIAX_BOOTSTRAP_MODE=0 "
+            "before deploying to production."
+        )
+
+    # 3e) Ensure patient_age column exists (BUG-008 migration)
     try:
         async with app.state.pool.acquire() as conn:
             await conn.execute(

@@ -21,6 +21,11 @@ class UserPayload(BaseModel):
     # SEC-H03: Session type preserved from login. False for old JWTs without this claim.
     # Used by sliding-window renewal to avoid extending normal sessions to remember-me duration.
     remember: bool = False
+    # Tenant identity: clinic_id and scope carried in JWT for request-level scoping.
+    # Old JWTs (issued before tenant fields were added) decode with both as None —
+    # fail-closed logic treats None scope as missing tenant context (401).
+    clinic_id: str | None = None
+    scope: str | None = None  # "clinic" | "global"
 
 
 class LoginRequest(BaseModel):

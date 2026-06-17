@@ -90,6 +90,8 @@ def create_access_token(
     expire_hours: float | None = None,
     fingerprint: str | None = None,
     remember: bool = False,
+    clinic_id: str | None = None,
+    scope: str | None = None,
 ) -> str:
     """Create a signed JWT with user payload. Includes 'iat' for sliding-window renewal.
 
@@ -97,6 +99,8 @@ def create_access_token(
         remember: Whether this is a "remember me" session. Stored as a boolean claim
                   in the JWT payload so that sliding-window renewal (see dependencies.py)
                   can preserve the original session type without extending it.
+        clinic_id: Tenant clinic UUID. None for superadmin (scope=global).
+        scope: Tenant scope — "clinic" for clinic-scoped users, "global" for superadmin.
     """
     jwt_secret = settings.JWT_SECRET.get_secret_value()
     hours = float(settings.JWT_EXPIRE_HOURS if expire_hours is None else expire_hours)
@@ -114,6 +118,12 @@ def create_access_token(
         # Old JWTs without this claim default to False (non-remember) on renewal.
         "remember": remember,
     }
+    # Tenant claims: clinic_id and scope.
+    # None values are omitted from JWT payload so old decoders ignore them gracefully.
+    if clinic_id is not None:
+        payload["clinic_id"] = clinic_id
+    if scope is not None:
+        payload["scope"] = scope
     if fingerprint:
         payload["fp"] = fingerprint
     if settings.jwt_issuer:
@@ -218,6 +228,9 @@ def decode_token(token: str) -> UserPayload:
         fp=payload.get("fp"),
         # SEC-H03: Default False for old JWTs that don't have this claim.
         remember=bool(payload.get("remember", False)),
+        # Tenant claims: None for old JWTs lacking them (fail-closed downstream).
+        clinic_id=payload.get("clinic_id"),
+        scope=payload.get("scope"),
     )
 
 
@@ -240,6 +253,9 @@ def decode_token_with_renewal_check(token: str) -> tuple[UserPayload, bool]:
         fp=payload.get("fp"),
         # SEC-H03: Default False for old JWTs that don't have this claim.
         remember=bool(payload.get("remember", False)),
+        # Tenant claims: None for old JWTs lacking them (fail-closed downstream).
+        clinic_id=payload.get("clinic_id"),
+        scope=payload.get("scope"),
     )
     return user, should_renew_token(payload)
 
@@ -481,6 +497,218 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
             "CREATE INDEX IF NOT EXISTS idx_login_attempts_email ON login_attempts (email)"
         )
 
+        # ── Tenant columns (idempotent ALTERs — safe for existing databases) ────
+        await conn.execute(
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS clinic_id UUID"
+        )
+        await conn.execute(
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS scope VARCHAR(20) DEFAULT 'clinic'"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usuarios_clinic_id ON usuarios (clinic_id)"
+        )
+        # constraints are added later by backfill validation, not here
+
+        # ── Non-auth table tenant columns (guarded — table may not exist on fresh DB) ──
+        # On fresh/staging DB startup, branding_config, analysis_jobs, and informes
+        # may not exist yet when auth tables are created. Use existence guards so
+        # startup is not fragile. The owning module's CREATE TABLE should include
+        # clinic_id (see branding_config in app.informes.db).
+        if await _table_exists(conn, "branding_config"):
+            await conn.execute(
+                "ALTER TABLE branding_config ADD COLUMN IF NOT EXISTS clinic_id UUID"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_branding_config_clinic_id ON branding_config (clinic_id)"
+            )
+        else:
+            logger.info("IMAGIAX Auth: branding_config not yet created — clinic_id ALTER skipped (will be created by owning module).")
+
+        if await _table_exists(conn, "analysis_jobs"):
+            await conn.execute(
+                "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID"
+            )
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS analysis_jobs_study_user_clinic_uniq "
+                "ON analysis_jobs (study_instance_uid, usuario_id, clinic_id)"
+            )
+        else:
+            logger.info("IMAGIAX Auth: analysis_jobs not yet created — clinic_id ALTER skipped.")
+
+        if await _table_exists(conn, "informes"):
+            await conn.execute(
+                "ALTER TABLE informes ADD COLUMN IF NOT EXISTS clinic_id UUID"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_informes_clinic_id ON informes (clinic_id)"
+            )
+        else:
+            logger.info("IMAGIAX Auth: informes not yet created — clinic_id ALTER skipped.")
+
+        logger.info("IMAGIAX Auth: tenant columns ensured.")
+
+
+# ── Tenant backfill helpers ────────────────────────────────────────────────────
+
+# Pilot clinic UUID — used as fallback for NULL clinic_id during backfill.
+# Override via IMAGIAX_PILOT_CLINIC_ID env var in production.
+_PILOT_CLINIC_ID = os.getenv("IMAGIAX_PILOT_CLINIC_ID", "00000000-0000-0000-0000-000000000000")
+
+
+async def _table_exists(conn: asyncpg.Connection, table_name: str) -> bool:
+    """Check whether a table exists in the public schema.
+
+    Shared helper used by create_auth_tables, backfill_tenant_columns,
+    and validate_tenant_null_counts to guard against missing tables
+    on fresh/staging databases.
+    """
+    return bool(await conn.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = $1)",
+        table_name,
+    ))
+
+
+async def backfill_tenant_columns(pool: asyncpg.Pool) -> dict[str, int]:
+    """Idempotent backfill: assign pilot clinic UUID to rows with NULL tenant columns.
+
+    Returns counts of affected rows for each table.
+    Superadmin rows with scope='global' keep clinic_id=NULL.
+
+    Gracefully skips non-auth tables (informes, analysis_jobs, branding_config)
+    that do not yet exist on fresh/staging databases — returns 0 for those.
+    """
+    pilot = _PILOT_CLINIC_ID
+    results: dict[str, int] = {}
+
+    async with pool.acquire() as conn:
+        # 1) Backfill usuarios: non-superadmin NULL clinic_id → pilot clinic
+        #    (usuarios always exists — created by create_auth_tables)
+        res = await conn.execute(
+            """
+            UPDATE usuarios
+            SET clinic_id = $1::uuid,
+                scope = COALESCE(scope, 'clinic')
+            WHERE clinic_id IS NULL
+              AND rol != 'superadmin'
+            """,
+            uuid.UUID(pilot),
+        )
+        results["usuarios_backfilled"] = int(res.split()[-1]) if res else 0
+
+        # 2) Superadmin rows: set scope='global' if still NULL/default
+        res2 = await conn.execute(
+            """
+            UPDATE usuarios
+            SET scope = 'global',
+                clinic_id = NULL
+            WHERE rol = 'superadmin'
+              AND (scope IS NULL OR scope = 'clinic')
+            """
+        )
+        results["superadmin_scope_set"] = int(res2.split()[-1]) if res2 else 0
+
+        # 3) Backfill informes: NULL clinic_id → pilot clinic
+        #    (ideally from owner user's clinic, but pilot is the safe default)
+        if await _table_exists(conn, "informes"):
+            res3 = await conn.execute(
+                """
+                UPDATE informes
+                SET clinic_id = $1::uuid
+                WHERE clinic_id IS NULL
+                """,
+                uuid.UUID(pilot),
+            )
+            results["informes_backfilled"] = int(res3.split()[-1]) if res3 else 0
+        else:
+            results["informes_backfilled"] = 0
+            logger.info("IMAGIAX Auth: informes table not yet created — backfill skipped.")
+
+        # 4) Backfill analysis_jobs: NULL clinic_id → pilot clinic
+        if await _table_exists(conn, "analysis_jobs"):
+            res4 = await conn.execute(
+                """
+                UPDATE analysis_jobs
+                SET clinic_id = $1::uuid
+                WHERE clinic_id IS NULL
+                """,
+                uuid.UUID(pilot),
+            )
+            results["analysis_jobs_backfilled"] = int(res4.split()[-1]) if res4 else 0
+        else:
+            results["analysis_jobs_backfilled"] = 0
+            logger.info("IMAGIAX Auth: analysis_jobs table not yet created — backfill skipped.")
+
+        # 5) Backfill branding_config: NULL clinic_id → pilot clinic
+        if await _table_exists(conn, "branding_config"):
+            res5 = await conn.execute(
+                """
+                UPDATE branding_config
+                SET clinic_id = $1::uuid
+                WHERE clinic_id IS NULL
+                """,
+                uuid.UUID(pilot),
+            )
+            results["branding_config_backfilled"] = int(res5.split()[-1]) if res5 else 0
+        else:
+            results["branding_config_backfilled"] = 0
+            logger.info("IMAGIAX Auth: branding_config table not yet created — backfill skipped.")
+
+    logger.info(
+        "IMAGIAX Auth: tenant backfill complete — %s",
+        results,
+    )
+    return results
+
+
+async def validate_tenant_null_counts(pool: asyncpg.Pool) -> dict[str, int]:
+    """Read-only validation: count NULL tenant rows before adding constraints.
+
+    Returns counts of NULL rows per table. If all are zero, constraints are safe.
+
+    Gracefully returns 0 for non-auth tables (informes, analysis_jobs,
+    branding_config) that do not yet exist on fresh/staging databases.
+    """
+    async with pool.acquire() as conn:
+        # usuarios always exists — created by create_auth_tables
+        usuarios_null = await conn.fetchval(
+            "SELECT COUNT(*) FROM usuarios WHERE clinic_id IS NULL AND rol != 'superadmin'"
+        )
+
+        # informes may not exist on fresh DB
+        if await _table_exists(conn, "informes"):
+            informes_null = await conn.fetchval(
+                "SELECT COUNT(*) FROM informes WHERE clinic_id IS NULL"
+            )
+        else:
+            informes_null = 0
+            logger.info("IMAGIAX Auth: informes table not yet created — validation skipped.")
+
+        # analysis_jobs may not exist on fresh DB
+        if await _table_exists(conn, "analysis_jobs"):
+            jobs_null = await conn.fetchval(
+                "SELECT COUNT(*) FROM analysis_jobs WHERE clinic_id IS NULL"
+            )
+        else:
+            jobs_null = 0
+            logger.info("IMAGIAX Auth: analysis_jobs table not yet created — validation skipped.")
+
+        # branding_config may not exist on fresh DB
+        if await _table_exists(conn, "branding_config"):
+            branding_null = await conn.fetchval(
+                "SELECT COUNT(*) FROM branding_config WHERE clinic_id IS NULL"
+            )
+        else:
+            branding_null = 0
+            logger.info("IMAGIAX Auth: branding_config table not yet created — validation skipped.")
+
+    return {
+        "usuarios_non_superadmin_null_clinic": usuarios_null or 0,
+        "informes_null_clinic": informes_null or 0,
+        "analysis_jobs_null_clinic": jobs_null or 0,
+        "branding_config_null_clinic": branding_null or 0,
+    }
+
 
 # ── User CRUD ──────────────────────────────────────────────────────────────────
 
@@ -488,17 +716,17 @@ async def get_user_by_email(pool: asyncpg.Pool, email: str) -> dict[str, Any] | 
     """Look up a user by email. Returns a dict with all fields or None."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, email, password_hash, nombre, rol, activo FROM usuarios WHERE email = $1",
+            "SELECT id, email, password_hash, nombre, rol, activo, clinic_id, scope FROM usuarios WHERE email = $1",
             email,
         )
         return dict(row) if row else None
 
 
 async def get_user_by_id(pool: asyncpg.Pool, user_id: str) -> dict[str, Any] | None:
-    """Look up a user by UUID."""
+    """Look up a user by UUID. Returns clinic_id and scope for tenant enforcement."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, email, nombre, rol, activo, created_at FROM usuarios WHERE id = $1",
+            "SELECT id, email, nombre, rol, activo, clinic_id, scope, created_at FROM usuarios WHERE id = $1",
             uuid.UUID(user_id),
         )
         return dict(row) if row else None
@@ -510,24 +738,40 @@ async def create_user(
     password: str,
     nombre: str,
     rol: str = "medico",
+    clinic_id: str | None = None,
+    scope: str | None = None,
 ) -> dict[str, Any]:
-    """Create a new user. Returns a dict with id, email, nombre, rol."""
+    """Create a new user. Returns a dict with id, email, nombre, rol, clinic_id, scope.
+
+    Non-superadmin users MUST have a non-NULL clinic_id (enforced by caller).
+    Superadmin may have clinic_id=NULL with scope='global'.
+    """
     if rol not in ROLES_VALIDOS:
         raise ValueError(f"Rol inválido: {rol}")
+    # Tenant validation: non-superadmin MUST have clinic_id
+    _resolved_scope = scope or ("global" if rol == "superadmin" else "clinic")
+    if rol != "superadmin" and clinic_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="clinic_id es obligatorio para usuarios no-superadmin.",
+        )
+    _clinic_uuid = uuid.UUID(clinic_id) if clinic_id else None
     validate_password_complexity(password)
     pw_hash = hash_password(password)
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
                 """
-                INSERT INTO usuarios (email, password_hash, nombre, rol)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id, email, nombre, rol, created_at
+                INSERT INTO usuarios (email, password_hash, nombre, rol, clinic_id, scope)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id, email, nombre, rol, clinic_id, scope, created_at
                 """,
                 email.lower().strip(),
                 pw_hash,
                 nombre.strip(),
                 rol,
+                _clinic_uuid,
+                _resolved_scope,
             )
             return dict(row)
         except Exception as exc:
@@ -549,10 +793,22 @@ async def update_password(pool: asyncpg.Pool, user_id: str, new_password: str) -
 
 
 async def list_users(pool: asyncpg.Pool) -> list[dict[str, Any]]:
-    """List all users (without password_hash)."""
+    """List all users (without password_hash), including tenant fields."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, email, nombre, rol, activo, created_at FROM usuarios ORDER BY created_at DESC"
+            "SELECT id, email, nombre, rol, activo, clinic_id, scope, created_at FROM usuarios ORDER BY created_at DESC"
+        )
+        return [dict(r) for r in rows]
+
+
+async def list_users_by_clinic(pool: asyncpg.Pool, clinic_id: str) -> list[dict[str, Any]]:
+    """List users for a specific clinic only (tenant isolation for clinic-scoped admins)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, email, nombre, rol, activo, clinic_id, scope, created_at "
+            "FROM usuarios WHERE clinic_id = $1::uuid "
+            "ORDER BY created_at DESC",
+            uuid.UUID(clinic_id),
         )
         return [dict(r) for r in rows]
 
@@ -615,7 +871,7 @@ async def update_user(
                 activo, uuid.UUID(user_id),
             )
         row = await conn.fetchrow(
-            "SELECT id, email, nombre, rol, activo, created_at, updated_at FROM usuarios WHERE id = $1",
+            "SELECT id, email, nombre, rol, activo, clinic_id, scope, created_at, updated_at FROM usuarios WHERE id = $1",
             uuid.UUID(user_id),
         )
         return dict(row) if row else None
@@ -769,7 +1025,7 @@ async def ensure_admin_exists(pool: asyncpg.Pool) -> None:
 
         # Promote existing admin with that email to superadmin
         promoted = await conn.fetchval(
-            "UPDATE usuarios SET rol = 'superadmin', updated_at = NOW() "
+            "UPDATE usuarios SET rol = 'superadmin', scope = 'global', updated_at = NOW() "
             "WHERE email = $1 AND rol = 'admin' RETURNING id",
             admin_email,
         )
@@ -781,9 +1037,9 @@ async def ensure_admin_exists(pool: asyncpg.Pool) -> None:
         pw_hash = hash_password(admin_password)
         await conn.execute(
             """
-            INSERT INTO usuarios (email, password_hash, nombre, rol)
-            VALUES ($1, $2, $3, 'superadmin')
-            ON CONFLICT (email) DO UPDATE SET rol = 'superadmin', updated_at = NOW()
+            INSERT INTO usuarios (email, password_hash, nombre, rol, scope)
+            VALUES ($1, $2, $3, 'superadmin', 'global')
+            ON CONFLICT (email) DO UPDATE SET rol = 'superadmin', scope = 'global', updated_at = NOW()
             """,
             admin_email,
             pw_hash,
@@ -826,12 +1082,13 @@ async def upsert_bootstrap_superadmin_from_env(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO usuarios (email, password_hash, nombre, rol)
-            VALUES ($1, $2, $3, 'superadmin')
+            INSERT INTO usuarios (email, password_hash, nombre, rol, scope)
+            VALUES ($1, $2, $3, 'superadmin', 'global')
             ON CONFLICT (email) DO UPDATE SET
                 password_hash = EXCLUDED.password_hash,
                 nombre = EXCLUDED.nombre,
                 rol = 'superadmin',
+                scope = 'global',
                 activo = TRUE,
                 updated_at = NOW()
             """,

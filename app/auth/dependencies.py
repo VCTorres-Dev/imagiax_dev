@@ -108,6 +108,8 @@ async def get_current_user(
                 expire_hours=renewal_hours,
                 fingerprint=fp,
                 remember=user.remember,
+                clinic_id=user.clinic_id,
+                scope=user.scope,
             )
             response.set_cookie(
                 key="imagiax_session",
