@@ -113,6 +113,32 @@ def _verify_target_tenant(admin: UserPayload, target: dict) -> None:
         )
 
 
+def _require_global_scope(admin: UserPayload) -> None:
+    """Restrict global-dashboard endpoints to global/superadmin scope only.
+
+    These endpoints query aggregate data across ALL clinics (stats, payments).
+    Clinic-scoped admins MUST NOT access cross-tenant data.
+
+    - scope == "global": allowed (superadmin or global admin)
+    - scope is None: 401 — missing tenant context, fail-closed
+    - scope == "clinic": 403 — insufficient scope for global dashboards
+
+    Must be called BEFORE any service/cache function to prevent data leakage.
+    """
+    if admin.scope == "global":
+        return
+    if admin.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    # scope == "clinic" (or any other non-global value)
+    raise HTTPException(
+        status_code=403,
+        detail="Acceso denegado. Se requiere permisos de superadmin para este recurso.",
+    )
+
+
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 async def admin_panel(request: Request) -> Response:
     """Panel HTML del admin (SPA protegida)."""
@@ -158,7 +184,8 @@ async def admin_stats(
     request: Request,
     user: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
-    """Estadisticas generales para el dashboard."""
+    """Estadisticas generales para el dashboard. Global/superadmin scope only."""
+    _require_global_scope(user)
     try:
         pool = request.app.state.pool
         stats = await admin_service.get_dashboard_stats(pool)
@@ -436,9 +463,10 @@ async def admin_auditoria(
 @router.get("/admin/api/pagos")
 async def admin_pagos(
     request: Request,
-    _: UserPayload = Depends(require_role("admin")),
+    user: UserPayload = Depends(require_role("admin")),
 ) -> JSONResponse:
-    """Resumen de pagos e ingresos."""
+    """Resumen de pagos e ingresos. Global/superadmin scope only."""
+    _require_global_scope(user)
     try:
         pool = request.app.state.pool
         summary = await admin_service.get_pagos_summary(pool)

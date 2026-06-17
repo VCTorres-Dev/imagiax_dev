@@ -20,6 +20,7 @@ Covers:
   - [CRITICAL-5] scope=clinic + clinic_id=None: fail-closed on study/listado/short-link + DB helpers
 - [CRITICAL-6] Clinic-scoped admin cannot mutate cross-tenant users (PATCH/reset/delete)
 - [CRITICAL-7] Admin with scope=clinic but no clinic_id cannot mutate any user
+- [CRITICAL-8] Clinic-scoped admin cannot access global dashboard endpoints (stats/pagos)
 
 No real database required — uses unittest with AsyncMock/patch for DB calls,
 and FastAPI TestClient for router-level tests with dependency overrides.
@@ -1638,6 +1639,204 @@ class TestAdminNoClinicIdFailClosed(unittest.TestCase):
             headers={"Origin": "http://localhost:3000"},
         )
         self.assertIn(resp.status_code, (401, 403))
+
+
+# ── [CRITICAL-8] Global dashboard endpoints restricted to global/superadmin ────
+
+
+class TestAdminGlobalDashboardTenantIsolation(unittest.TestCase):
+    """Clinic-scoped admins MUST NOT access /admin/api/stats or /admin/api/pagos.
+
+    Both endpoints query aggregate cross-tenant data (global stats, all payments).
+    The _require_global_scope gate must fail-closed:
+      - scope="clinic" → 403 (insufficient scope)
+      - scope=None    → 401 (missing tenant context)
+      - scope="global" → 200 (allowed)
+    Service functions must NOT be called for rejected requests (no data leakage).
+    """
+
+    def setUp(self):
+        self.app = _make_test_app()
+        self.client = TestClient(self.app)
+
+    # ── stats endpoint ─────────────────────────────────────────────────────────
+
+    @patch("app.admin.router.admin_service.get_dashboard_stats", new_callable=AsyncMock)
+    def test_stats_rejects_clinic_scoped_admin(self, mock_stats):
+        """Clinic-scoped admin gets 403 on /admin/api/stats; service NOT called."""
+        from app.auth.dependencies import get_current_user
+
+        mock_stats.return_value = {"usuarios": {}, "informes": {}}
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/stats")
+        self.assertEqual(resp.status_code, 403, f"Expected 403, got {resp.status_code}: {resp.json()}")
+        # Service function must NOT be called — prevents cross-tenant data leakage
+        mock_stats.assert_not_called()
+
+    @patch("app.admin.router.admin_service.get_dashboard_stats", new_callable=AsyncMock)
+    def test_stats_rejects_admin_no_clinic_id(self, mock_stats):
+        """Admin with scope=None (old JWT) gets 401 on /admin/api/stats; service NOT called."""
+        from app.auth.dependencies import get_current_user
+
+        mock_stats.return_value = {"usuarios": {}, "informes": {}}
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/stats")
+        self.assertIn(resp.status_code, (401, 403), f"Expected 401/403, got {resp.status_code}")
+        # ADMIN_USER_NO_CLINIC has scope="clinic" but clinic_id=None → should 401
+        # If scope were None, it would also be 401
+        mock_stats.assert_not_called()
+
+    @patch("app.admin.router.admin_service.get_dashboard_stats", new_callable=AsyncMock)
+    def test_stats_rejects_no_scope_user(self, mock_stats):
+        """User with scope=None (legacy JWT) gets 401 on /admin/api/stats."""
+        from app.auth.dependencies import get_current_user
+
+        # Create an admin with scope=None for this test
+        no_scope_admin = UserPayload(
+            user_id="admin-no-scope-id",
+            email="admin-no-scope@dev",
+            nombre="Admin No Scope",
+            rol="admin",
+            clinic_id=None,
+            scope=None,
+        )
+        mock_stats.return_value = {"usuarios": {}, "informes": {}}
+        self.client.app.dependency_overrides[get_current_user] = lambda: no_scope_admin
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/stats")
+        self.assertIn(resp.status_code, (401, 403), f"Expected 401/403, got {resp.status_code}")
+        mock_stats.assert_not_called()
+
+    @patch("app.admin.router.admin_service.get_dashboard_stats", new_callable=AsyncMock)
+    def test_stats_allows_global_admin(self, mock_stats):
+        """Global/superadmin can access /admin/api/stats; service IS called."""
+        from app.auth.dependencies import get_current_user
+
+        fake_stats = {
+            "usuarios": {"total": 10, "activos": 8},
+            "informes": {"total": 50},
+            "ingresos_total_clp": 100000,
+            "audit_eventos": 5,
+            "creditos": {"disponibles": 100, "total_comprados": 200},
+        }
+        mock_stats.return_value = fake_stats
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/stats")
+        self.assertEqual(resp.status_code, 200, f"Expected 200, got {resp.status_code}: {resp.json()}")
+        # Service function MUST be called for global admin
+        mock_stats.assert_called_once()
+        # Verify data is returned
+        data = resp.json()
+        self.assertIn("usuarios", data)
+
+    # ── pagos endpoint ─────────────────────────────────────────────────────────
+
+    @patch("app.admin.router.admin_service.get_pagos_summary", new_callable=AsyncMock)
+    def test_pagos_rejects_clinic_scoped_admin(self, mock_pagos):
+        """Clinic-scoped admin gets 403 on /admin/api/pagos; service NOT called."""
+        from app.auth.dependencies import get_current_user
+
+        mock_pagos.return_value = {"ingresos_total_clp": 0}
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/pagos")
+        self.assertEqual(resp.status_code, 403, f"Expected 403, got {resp.status_code}: {resp.json()}")
+        # Service function must NOT be called — prevents cross-tenant financial data leakage
+        mock_pagos.assert_not_called()
+
+    @patch("app.admin.router.admin_service.get_pagos_summary", new_callable=AsyncMock)
+    def test_pagos_rejects_admin_no_clinic_id(self, mock_pagos):
+        """Admin with scope=clinic but no clinic_id gets 401 on /admin/api/pagos."""
+        from app.auth.dependencies import get_current_user
+
+        mock_pagos.return_value = {"ingresos_total_clp": 0}
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/pagos")
+        self.assertIn(resp.status_code, (401, 403), f"Expected 401/403, got {resp.status_code}")
+        mock_pagos.assert_not_called()
+
+    @patch("app.admin.router.admin_service.get_pagos_summary", new_callable=AsyncMock)
+    def test_pagos_rejects_no_scope_user(self, mock_pagos):
+        """User with scope=None (legacy JWT) gets 401 on /admin/api/pagos."""
+        from app.auth.dependencies import get_current_user
+
+        no_scope_admin = UserPayload(
+            user_id="admin-no-scope-id",
+            email="admin-no-scope@dev",
+            nombre="Admin No Scope",
+            rol="admin",
+            clinic_id=None,
+            scope=None,
+        )
+        mock_pagos.return_value = {"ingresos_total_clp": 0}
+        self.client.app.dependency_overrides[get_current_user] = lambda: no_scope_admin
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/pagos")
+        self.assertIn(resp.status_code, (401, 403), f"Expected 401/403, got {resp.status_code}")
+        mock_pagos.assert_not_called()
+
+    @patch("app.admin.router.admin_service.get_pagos_summary", new_callable=AsyncMock)
+    def test_pagos_allows_global_admin(self, mock_pagos):
+        """Global/superadmin can access /admin/api/pagos; service IS called."""
+        from app.auth.dependencies import get_current_user
+
+        fake_pagos = {
+            "ingresos_total_clp": 500000,
+            "ingresos_por_metodo": [],
+            "cobros_fallidos": 0,
+            "top_medicos": [],
+            "licencias": [],
+        }
+        mock_pagos.return_value = fake_pagos
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/pagos")
+        self.assertEqual(resp.status_code, 200, f"Expected 200, got {resp.status_code}: {resp.json()}")
+        # Service function MUST be called for global admin
+        mock_pagos.assert_called_once()
+        # Verify financial data is returned to global admin
+        data = resp.json()
+        self.assertIn("ingresos_total_clp", data)
+
+    # ── cross-tenant clinic B admin cannot access ─────────────────────────────
+
+    @patch("app.admin.router.admin_service.get_dashboard_stats", new_callable=AsyncMock)
+    def test_stats_rejects_different_clinic_admin(self, mock_stats):
+        """Admin from Clinic B also gets 403 — no cross-tenant leakage."""
+        from app.auth.dependencies import get_current_user
+
+        mock_stats.return_value = {"usuarios": {}, "informes": {}}
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_CLINIC_B
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/stats")
+        self.assertEqual(resp.status_code, 403)
+        mock_stats.assert_not_called()
+
+    @patch("app.admin.router.admin_service.get_pagos_summary", new_callable=AsyncMock)
+    def test_pagos_rejects_different_clinic_admin(self, mock_pagos):
+        """Admin from Clinic B also gets 403 on /admin/api/pagos."""
+        from app.auth.dependencies import get_current_user
+
+        mock_pagos.return_value = {"ingresos_total_clp": 0}
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_CLINIC_B
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/admin/api/pagos")
+        self.assertEqual(resp.status_code, 403)
+        mock_pagos.assert_not_called()
 
 
 if __name__ == "__main__":
