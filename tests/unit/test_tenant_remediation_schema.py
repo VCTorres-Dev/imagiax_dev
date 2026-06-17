@@ -15,6 +15,7 @@ Covers:
 - Startup code creates branding_config table WITH clinic_id column
 """
 
+import ast
 import os
 import re
 import unittest
@@ -43,6 +44,31 @@ def _read_all_migration_sql() -> list[str]:
             with open(os.path.join(_MIGRATIONS_DIR, fname), "r") as f:
                 sqls.append(f.read())
     return sqls
+
+
+def _extract_conn_execute_sql(source: str) -> list[str]:
+    """Return literal SQL strings passed to conn.execute() calls.
+
+    This catches executable SQL embedded as Python string literals while ignoring
+    comments and explanatory text. Adjacent string literals are folded by the
+    Python parser, matching runtime behavior.
+    """
+    tree = ast.parse(source)
+    sql: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "execute"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "conn"
+        ):
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            sql.append(node.args[0].value)
+    return sql
 
 
 # ─── Migration content tests ──────────────────────────────────────────────
@@ -330,26 +356,17 @@ class TestStartupCodeDeferredUniqueIndex(unittest.TestCase):
         """create_auth_tables must NOT create analysis_jobs_study_user_clinic_uniq
         — even as a partial index. This is deferred to post-remediation."""
         source = self._read_auth_service_source()
-        # Must NOT contain a CREATE UNIQUE INDEX for analysis_jobs_study_user_clinic_uniq
-        # as executable SQL (comments mentioning it as "do not create" are fine)
-        # Search for the pattern in non-comment lines
+        executable_sql = "\n".join(_extract_conn_execute_sql(source))
         pattern = re.compile(
             r'CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+'
             r'analysis_jobs_study_user_clinic_uniq',
             re.IGNORECASE,
         )
-        # Only check non-comment lines (lines not starting with #)
-        for line in source.split('\n'):
-            stripped = line.strip()
-            # Skip Python comment lines
-            if stripped.startswith('#') or stripped.startswith('"') or stripped.startswith("'"):
-                continue
-            # Check string literals that contain SQL
-            if pattern.search(stripped):
-                self.fail(
-                    f"create_auth_tables must NOT create analysis_jobs_study_user_clinic_uniq "
-                    f"yet. Found in executable line: {stripped[:200]}"
-                )
+        self.assertIsNone(
+            pattern.search(executable_sql),
+            "create_auth_tables must NOT execute creation of "
+            "analysis_jobs_study_user_clinic_uniq yet",
+        )
 
     def test_create_auth_tables_adds_dedup_columns(self):
         """create_auth_tables must add deduped_at, deduped_into_job_id,
@@ -390,12 +407,13 @@ class TestStartupCodeDeferredUniqueIndex(unittest.TestCase):
         )
 
     def test_create_auth_tables_no_unsafe_total_unique_index(self):
-        """create_auth_tables must NOT create an unsafe total unique index on
-        analysis_jobs (study_instance_uid, usuario_id, clinic_id) without
-        a WHERE clause."""
+        """create_auth_tables must not create any study/user/clinic unique index.
+
+        Even a partial WHERE deduped_at IS NULL index is deferred until after
+        production historical duplicates are marked with deduped_at.
+        """
         source = self._read_auth_service_source()
-        # Search for any CREATE UNIQUE INDEX on analysis_jobs for study_user_clinic
-        # that does NOT have WHERE deduped_at IS NULL
+        executable_sql = "\n".join(_extract_conn_execute_sql(source))
         pattern = re.compile(
             r"CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+"
             r"analysis_jobs_study_user_clinic_uniq\s*"
@@ -403,22 +421,11 @@ class TestStartupCodeDeferredUniqueIndex(unittest.TestCase):
             r"usuario_id[^)]*clinic_id[^)]*\)",
             re.IGNORECASE | re.DOTALL,
         )
-        for match in pattern.finditer(source):
-            # Get the text after the closing paren of the ON clause
-            after_match = source[match.end():]
-            # The next significant token must be WHERE deduped_at IS NULL
-            after_stripped = after_match.strip()
-            if not after_stripped.upper().startswith("WHERE"):
-                # This is an unsafe total unique index
-                self.fail(
-                    f"Unsafe total unique index found without WHERE clause: "
-                    f"{match.group()[:200]}"
-                )
-            self.assertIn(
-                "DEDUPED_AT IS NULL",
-                after_stripped[:60].upper(),
-                "Unique index must have WHERE deduped_at IS NULL predicate",
-            )
+        self.assertIsNone(
+            pattern.search(executable_sql),
+            "create_auth_tables must defer analysis_jobs_study_user_clinic_uniq "
+            "entirely until after production data remediation",
+        )
 
     def test_create_branding_tables_includes_clinic_id(self):
         """create_branding_tables must include clinic_id in the CREATE TABLE
