@@ -155,6 +155,11 @@ async def ver_informe(
             status_code=401,
             detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
         )
+    if user.scope != "global" and not user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
 
     try:
         informe = await informes_db.get_informe_por_id(pool, informe_id)

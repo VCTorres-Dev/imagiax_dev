@@ -101,6 +101,40 @@ router = APIRouter(tags=["ai"])
 
 
 # ============================================================
+# Tenant guards
+# ============================================================
+
+
+def _require_global_scope_for_direct_dicom_phi(current_user: UserPayload) -> None:
+    """Reject non-global users from direct DICOM PHI access by arbitrary UID.
+
+    Until a reliable DICOM-to-clinic authorization mechanism exists,
+    only global/superadmin users may access these direct-UID PHI endpoints.
+    Clinic-scoped users have no way to prove ownership of an arbitrary
+    Study/Series/SOP Instance UID, so access must fail closed.
+
+    Raises:
+        HTTPException(401): Missing or broken tenant context (scope=None or clinic_id missing).
+        HTTPException(403): Insufficient scope (scope=clinic).
+    """
+    if current_user.scope is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    if current_user.scope != "global" and not current_user.clinic_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sesión sin contexto de clínica. Inicie sesión nuevamente.",
+        )
+    if current_user.scope != "global":
+        raise HTTPException(
+            status_code=403,
+            detail="Acceso directo a estudios DICOM requiere permisos globales.",
+        )
+
+
+# ============================================================
 # Clean URL redirect endpoint (no auth required)
 # ============================================================
 
@@ -416,6 +450,7 @@ async def analizar_instancia(
     request: Request,
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
+    _require_global_scope_for_direct_dicom_phi(current_user)
     orthanc = _get_orthanc_client(request)
     model = _get_model(request)
     device = getattr(request.app.state, "device", torch.device("cpu"))
@@ -443,6 +478,7 @@ async def analizar_serie(
     request: Request,
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
+    _require_global_scope_for_direct_dicom_phi(current_user)
     orthanc = _get_orthanc_client(request)
     model = _get_model(request)
     device = getattr(request.app.state, "device", torch.device("cpu"))
@@ -494,6 +530,7 @@ async def analizar_estudio(
     request: Request,
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
+    _require_global_scope_for_direct_dicom_phi(current_user)
     orthanc = _get_orthanc_client(request)
     model = _get_model(request)
     device = getattr(request.app.state, "device", torch.device("cpu"))
@@ -576,6 +613,7 @@ async def obtener_resultado_estudio(
     request: Request = None,  # noqa: B008 — FastAPI special injection
     current_user: UserPayload = Depends(get_current_user),
 ) -> JSONResponse:
+    _require_global_scope_for_direct_dicom_phi(current_user)
     orthanc = _get_orthanc_client(request)
     stored = await get_study_result_metadata(orthanc, study_instance_uid)
     if stored is None:

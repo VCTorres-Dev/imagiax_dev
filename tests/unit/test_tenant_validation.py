@@ -2122,5 +2122,516 @@ class TestActualizarDecisionTenantDB(unittest.TestCase):
         self.assertIn("WHERE id = $1::uuid\n", source)
 
 
+# ── [CRITICAL-10] ver_informe: scope=clinic + clinic_id=None fail-closed ────────
+
+
+class TestVerInformeClinicScopeNoClinicId(unittest.TestCase):
+    """ver_informe must reject clinic-scoped users with missing clinic_id before DB fetch.
+
+    Previously, the endpoint only checked scope is None but did NOT reject
+    scope=clinic with clinic_id=None. A malformed clinic-scoped admin with
+    no clinic_id could read NULL-clinic PHI.
+    """
+
+    def setUp(self):
+        self.app = _make_test_app()
+        self.client = TestClient(self.app)
+
+    @patch("app.informes.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    def test_ver_informe_rejects_clinic_scope_no_clinic_id(self, mock_get):
+        """User with scope='clinic' but clinic_id=None must get 401 on /informes/{id}/ver
+        before any DB lookup."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/informes/some-id/ver", follow_redirects=False)
+        self.assertEqual(resp.status_code, 401)
+        # DB helper must NOT have been called — fail-closed before lookup
+        mock_get.assert_not_called()
+
+    @patch("app.informes.router.informes_db.get_informe_por_id", new_callable=AsyncMock)
+    def test_ver_informe_admin_no_clinic_id_rejected(self, mock_get):
+        """Admin with scope='clinic' but clinic_id=None must get 401 on /informes/{id}/ver."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/informes/some-id/ver", follow_redirects=False)
+        self.assertEqual(resp.status_code, 401)
+        mock_get.assert_not_called()
+
+
+# ── [CRITICAL-11] Direct DICOM PHI endpoints require global scope ──────────────
+
+
+class TestDirectDicomPhiTenantIsolation(unittest.TestCase):
+    """Direct DICOM PHI endpoints (/analizar/*, /resultados/estudio/{uid}) must
+    reject non-global users before any Orthanc fetch/analysis.
+
+    These endpoints accept arbitrary Study/Series/SOP UIDs without any way
+    to verify the requesting user's clinic owns that object in Orthanc.
+    Until a reliable DICOM-to-clinic authorization mechanism exists,
+    only global/superadmin users may access these endpoints.
+
+    Fail-closed behaviour:
+      - scope=None              → 401 (missing/broken tenant context)
+      - scope=clinic, no clinic  → 401 (broken session)
+      - scope=clinic, valid clinic → 403 (insufficient scope for direct UID access)
+      - scope=global            → allowed (reaches mocked downstream)
+    """
+
+    def setUp(self):
+        self.app = _make_test_app()
+        self.client = TestClient(self.app)
+        # Reset in-process rate limiter so per-test requests don't get 429'd
+        from app.core.middleware import _analysis_limiter
+        _analysis_limiter.reset("testclient")
+
+    # ── /analizar/instancia ─────────────────────────────────────────────────
+
+    def test_analizar_instancia_rejects_no_scope(self):
+        """scope=None → 401 before any Orthanc/analysis call."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/instancia", json={
+            "orthanc_instance_id": "test-instance-id",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_instancia_rejects_clinic_scope_no_clinic_id(self):
+        """scope=clinic, clinic_id=None → 401 before any Orthanc/analysis call."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/instancia", json={
+            "orthanc_instance_id": "test-instance-id",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_instancia_rejects_clinic_scope(self):
+        """scope=clinic with valid clinic_id → 403 (insufficient scope)."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/instancia", json={
+            "orthanc_instance_id": "test-instance-id",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.analyze_single_instance", new_callable=AsyncMock)
+    @patch("app.ai.router.resolve_orthanc_instance_id", new_callable=AsyncMock)
+    def test_analizar_instancia_allows_global_user(self, mock_resolve, mock_analyze):
+        """scope=global (superadmin) → passes auth, reaches downstream helper."""
+        from app.auth.dependencies import get_current_user
+
+        mock_resolve.return_value = "resolved-id"
+        mock_analyze.return_value = {"orthanc_instance_id": "resolved-id", "dicom": {}}
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        # Need orthanc client on app.state
+        self.client.app.state.orthanc = AsyncMock()
+        self.client.app.state.model = MagicMock()
+        self.client.app.state.device = "cpu"
+
+        resp = self.client.post("/analizar/instancia", json={
+            "orthanc_instance_id": "test-instance-id",
+        }, headers={"Origin": "http://localhost:8010"})
+        # Should NOT be 401 or 403 — token is accepted
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── /analizar/serie ────────────────────────────────────────────────────
+
+    def test_analizar_serie_rejects_no_scope(self):
+        """scope=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_serie_rejects_clinic_scope_no_clinic_id(self):
+        """scope=clinic, clinic_id=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_serie_rejects_clinic_scope(self):
+        """scope=clinic with valid clinic_id → 403."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.find_instances_by_query", new_callable=AsyncMock)
+    def test_analizar_serie_allows_global_user(self, mock_find):
+        """scope=global → passes auth guard, reaches downstream."""
+        from app.auth.dependencies import get_current_user
+
+        mock_find.return_value = []  # no instances found → will fail later, but auth is OK
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        self.client.app.state.orthanc = AsyncMock()
+        self.client.app.state.model = MagicMock()
+        self.client.app.state.device = "cpu"
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        # Should NOT be 401 or 403
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── /analizar/estudio ───────────────────────────────────────────────────
+
+    def test_analizar_estudio_rejects_no_scope(self):
+        """scope=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_estudio_rejects_clinic_scope_no_clinic_id(self):
+        """scope=clinic, clinic_id=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_estudio_rejects_clinic_scope(self):
+        """scope=clinic with valid clinic_id → 403."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.find_instances_by_query", new_callable=AsyncMock)
+    def test_analizar_estudio_allows_global_user(self, mock_find):
+        """scope=global → passes auth guard, reaches downstream."""
+        from app.auth.dependencies import get_current_user
+
+        mock_find.return_value = []
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        self.client.app.state.orthanc = AsyncMock()
+        self.client.app.state.model = MagicMock()
+        self.client.app.state.device = "cpu"
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── /resultados/estudio/{uid} ────────────────────────────────────────────
+
+    def test_resultados_estudio_rejects_no_scope(self):
+        """scope=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_resultados_estudio_rejects_clinic_scope_no_clinic_id(self):
+        """scope=clinic, clinic_id=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_resultados_estudio_rejects_clinic_scope(self):
+        """scope=clinic with valid clinic_id → 403."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.get_study_result_metadata", new_callable=AsyncMock)
+    def test_resultados_estudio_allows_global_user(self, mock_get_result):
+        """scope=global → passes auth guard, reaches downstream."""
+        from app.auth.dependencies import get_current_user
+
+        mock_get_result.return_value = {"key": "value"}  # non-None → will return 200
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        self.client.app.state.orthanc = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        # Should NOT be 401 or 403; will be 200 or other downstream status
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── Admin-scoped (scope=clinic) also rejected ───────────────────────────
+
+    def test_analizar_instancia_rejects_admin_clinic_scope(self):
+        """Admin with scope=clinic also rejected from direct DICOM PHI."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/instancia", json={
+            "orthanc_instance_id": "test-instance-id",
+        })
+        self.assertEqual(resp.status_code, 403)
+
+    def test_resultados_estudio_rejects_admin_clinic_scope(self):
+        """Admin with scope=clinic also rejected from /resultados/estudio/{uid}."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.analyze_single_instance", new_callable=AsyncMock)
+    @patch("app.ai.router.resolve_orthanc_instance_id", new_callable=AsyncMock)
+    def test_analizar_instancia_allows_global_user(self, mock_resolve, mock_analyze):
+        """scope=global (superadmin) → passes auth, reaches downstream helper."""
+        from app.auth.dependencies import get_current_user
+
+        mock_resolve.return_value = "resolved-id"
+        mock_analyze.return_value = {"orthanc_instance_id": "resolved-id", "dicom": {}}
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        # Need orthanc client on app.state
+        self.client.app.state.orthanc = AsyncMock()
+        self.client.app.state.model = MagicMock()
+        self.client.app.state.device = "cpu"
+
+        resp = self.client.post("/analizar/instancia", json={
+            "orthanc_instance_id": "test-instance-id",
+        }, headers={"Origin": "http://localhost:8010"})
+        # Should NOT be 401 or 403 — token is accepted
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── /analizar/serie ────────────────────────────────────────────────────
+
+    def test_analizar_serie_rejects_no_scope(self):
+        """scope=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_serie_rejects_clinic_scope_no_clinic_id(self):
+        """scope=clinic, clinic_id=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_serie_rejects_clinic_scope(self):
+        """scope=clinic with valid clinic_id → 403."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        })
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.find_instances_by_query", new_callable=AsyncMock)
+    def test_analizar_serie_allows_global_user(self, mock_find):
+        """scope=global → passes auth guard, reaches downstream."""
+        from app.auth.dependencies import get_current_user
+
+        mock_find.return_value = []  # no instances → will fail later, but auth is OK
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        self.client.app.state.orthanc = AsyncMock()
+        self.client.app.state.model = MagicMock()
+        self.client.app.state.device = "cpu"
+
+        resp = self.client.post("/analizar/serie", json={
+            "series_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        # Should NOT be 401 or 403
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── /analizar/estudio ───────────────────────────────────────────────────
+
+    def test_analizar_estudio_rejects_no_scope(self):
+        """scope=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_estudio_rejects_clinic_scope_no_clinic_id(self):
+        """scope=clinic, clinic_id=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_analizar_estudio_rejects_clinic_scope(self):
+        """scope=clinic with valid clinic_id → 403."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.find_instances_by_query", new_callable=AsyncMock)
+    def test_analizar_estudio_allows_global_user(self, mock_find):
+        """scope=global → passes auth guard, reaches downstream."""
+        from app.auth.dependencies import get_current_user
+
+        mock_find.return_value = []
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        self.client.app.state.orthanc = AsyncMock()
+        self.client.app.state.model = MagicMock()
+        self.client.app.state.device = "cpu"
+
+        resp = self.client.post("/analizar/estudio", json={
+            "study_instance_uid": "1.2.3.4.5.6.7.8",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── /resultados/estudio/{uid} ────────────────────────────────────────────
+
+    def test_resultados_estudio_rejects_no_scope(self):
+        """scope=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: NO_SCOPE_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_resultados_estudio_rejects_clinic_scope_no_clinic_id(self):
+        """scope=clinic, clinic_id=None → 401."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER_NO_CLINIC
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_resultados_estudio_rejects_clinic_scope(self):
+        """scope=clinic with valid clinic_id → 403."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: CLINIC_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 403)
+
+    @patch("app.ai.router.get_study_result_metadata", new_callable=AsyncMock)
+    def test_resultados_estudio_allows_global_user(self, mock_get_result):
+        """scope=global → passes auth guard, reaches downstream."""
+        from app.auth.dependencies import get_current_user, get_current_user as _gcu
+
+        mock_get_result.return_value = {"key": "value"}  # non-None → will return 200
+        self.client.app.dependency_overrides[get_current_user] = lambda: GLOBAL_USER
+        self.client.app.state.pool = AsyncMock()
+        self.client.app.state.orthanc = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        # Should NOT be 401 or 403; will be 200 or other downstream status
+        self.assertNotIn(resp.status_code, (401, 403))
+
+    # ── Admin-scoped (scope=clinic) also rejected ───────────────────────────
+
+    def test_analizar_instancia_rejects_admin_clinic_scope(self):
+        """Admin with scope=clinic also rejected from direct DICOM PHI."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.post("/analizar/instancia", json={
+            "orthanc_instance_id": "test-instance-id",
+        }, headers={"Origin": "http://localhost:8010"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_resultados_estudio_rejects_admin_clinic_scope(self):
+        """Admin with scope=clinic also rejected from /resultados/estudio/{uid}."""
+        from app.auth.dependencies import get_current_user
+
+        self.client.app.dependency_overrides[get_current_user] = lambda: ADMIN_USER
+        self.client.app.state.pool = AsyncMock()
+
+        resp = self.client.get("/resultados/estudio/1.2.3.4.5.6.7.8")
+        self.assertEqual(resp.status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main()
