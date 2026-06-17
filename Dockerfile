@@ -60,6 +60,10 @@ WORKDIR /app
 # Copiar el paquete app/ (nuevo entry point: app.main:create_app)
 COPY app/ ./app/
 
+# Copiar plantillas de prompts requeridas por app.ai.prompt_orchestrator.
+# Sin este directorio la imagen arranca con warnings y la calidad/runtime de IA se degrada.
+COPY prompts/ ./prompts/
+
 # Directorio de cache para TorchXRayVision.
 # En docker-compose.prod.yml se monta como volumen para persistir entre reinicios.
 RUN mkdir -p /home/imagiax/.torchxrayvision \
@@ -70,9 +74,9 @@ USER imagiax
 
 EXPOSE 8010
 
-# Liveness probe: GET /ping debe responder 200 en menos de 5 s
+# Liveness probe: GET /salud debe responder 200 en menos de 5 s
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS http://localhost:8010/ping || exit 1
+    CMD curl -fsS http://localhost:8010/salud || exit 1
 
 # workers=1: PyTorch no es thread-safe con múltiples workers en inferencia
 # forwarded-allow-ips: solo confiar en el proxy nginx (red Docker interna)

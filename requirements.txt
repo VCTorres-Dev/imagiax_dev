@@ -15,6 +15,7 @@ pydantic==2.12.5
 pydicom==3.0.1
 asyncpg==0.31.0
 google-genai==1.66.0
+PyYAML==6.0.2
 
 # Procesamiento de imágenes — headless para entorno Docker sin display
 opencv-python-headless==4.13.0.92
@@ -37,4 +38,5 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 
 # Exportación de reportes
+fpdf2==2.8.5
 openpyxl==3.1.5
