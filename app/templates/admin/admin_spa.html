@@ -1795,13 +1795,13 @@ function setGreeting() {
 function initApp() {
   const loginScreen = document.getElementById('login-screen');
   const appScreen = document.getElementById('app');
-  
+
   if (loginScreen) {
     // Transición suave
     loginScreen.style.transition = 'opacity 0.6s ease';
     loginScreen.style.opacity = '0';
     loginScreen.style.pointerEvents = 'none';
-    
+
     setTimeout(() => {
       loginScreen.style.display = 'none';
       // Limpiar animaciones y observers de GSAP pesados
@@ -1813,7 +1813,7 @@ function initApp() {
       }
     }, 600);
   }
-  
+
   if (appScreen) {
     appScreen.style.display = 'flex';
     appScreen.style.opacity = '0';
@@ -1827,7 +1827,7 @@ function initApp() {
     if (sidebarName) sidebarName.textContent = currentUser.nombre || currentUser.email;
     if (sidebarAvatar) sidebarAvatar.textContent = (currentUser.nombre || 'A')[0].toUpperCase();
   }
-  
+
   if (typeof startClock === 'function') startClock();
   if (typeof setGreeting === 'function') setGreeting();
   if (typeof loadDashboard === 'function') loadDashboard();

@@ -116,4 +116,3 @@ active_changes:
     path: openspec/changes/verification-fixes/
     status: verified (FAIL — resolved via comprehensive-hardening)
     summary: "Security remediation verification. 13/14 PASS. T1.1 resolved: /auth/verify now checks usuarios.activo."
-
