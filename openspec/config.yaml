@@ -1,0 +1,119 @@
+schema: spec-driven
+project: IMAGIAX
+last_init: "2026-04-04"
+
+context: |
+  Platform: Medical imaging AI platform (radiología con IA) — live at imagiax.dev (DigitalOcean, ubuntu-s-2vcpu-4gb-nyc3-01)
+  Backend: FastAPI 0.129 + Uvicorn 0.41, Python 3.11, port 8010. Modules: servidor_api_orthanc_v1 (main),
+    imagiax_auth (JWT+bcrypt RBAC: admin/medico/recepcion), imagiax_db (asyncpg pool, PostgreSQL),
+    imagiax_model (ResNet50-512-all TorchXRayVision, 18 NIH pathologies + DenseNet/UNet), imagiax_admin (HTML panel),
+    pagos_mp (MercadoPago), pagos_tbk (Transbank OneClick), imagiax_pagos_db.
+  Frontend: OHIF Medical Imaging Viewer v3.13-beta (React 18, Lerna monorepo, port 3000).
+    Custom extension: @ohif/extension-imagiax-ai (Webpack, TypeScript, React 18, jsPDF, QRCode).
+    Located at: OHIF Medical Imaging Viewer/Viewers/extensions/imagiax-ai/src/
+  PACS: Orthanc DICOM server (port 8042). DICOM flow: Orthanc → FastAPI → AI → OHIF panel.
+  Database: PostgreSQL via asyncpg pool (tables: informes, pagos, usuarios, revoked_users, revoked_tokens). Schema auto-created on startup.
+  AI: ResNet50-res512-all (TorchXRayVision), DenseNet custom, UNet segmentation, NIH multilabel 18-class,
+    GradCAM visualization, Gemini 2.5-flash for clinical report generation. PyTorch 2.6.0 CPU (ARM64/x86_64).
+  Payments: MercadoPago + Transbank Webpay OneClick (credits + card). Price ~990 CLP/scan.
+  Deploy: Docker (python:3.11-slim), nginx reverse proxy (template config), Docker Compose on DigitalOcean.
+    SSH: ssh -i ~/.ssh/do_imagiax root@imagiax.dev
+  Auth: JWT Bearer (PyJWT) + HttpOnly cookie. Brute-force protection (in-memory rate limiter).
+  Conventions: async/await throughout, no ORM (raw asyncpg), Pydantic v2 models, RBAC via Depends.
+  Git: 4 commits on main. Latest: security(phase4) — input limits, deployment checklist, regression pass.
+
+strict_tdd: false
+
+testing:
+  strict_tdd: false
+  note: "pytest NOT installed in local env. py_compile available for syntax checks. No pyproject.toml/pytest.ini."
+  runner:
+    backend:
+      available: false
+      framework: null
+      command: "python -m py_compile <file>  # syntax only"
+    frontend:
+      available: true
+      framework: jest
+      command: "cd 'OHIF Medical Imaging Viewer/Viewers' && yarn test:unit"
+      coverage: "jest --collectCoverage (configured via .nycrc.json)"
+  layers:
+    unit:
+      backend: false
+      frontend: true
+      tool: "jest (jest.config.js — multi-project, covers platform/* and extensions/*)"
+    integration:
+      available: partial
+      tool: "test_login.py (urllib — requires live server at localhost:8010)"
+    e2e:
+      available: true
+      tool: "Playwright (playwright.config.ts — baseURL localhost:3335)"
+      command: "cd 'OHIF Medical Imaging Viewer/Viewers' && npx playwright test"
+  coverage:
+    backend: false
+    frontend: true
+    command: "yarn test:unit (jest --collectCoverage)"
+  quality:
+    linter:
+      backend: false
+      frontend: true
+      command: "cd 'OHIF Medical Imaging Viewer/Viewers' && yarn lint  # ESLint + TypeScript-ESLint + Prettier"
+    type_checker:
+      backend: false
+      frontend: true
+      command: "cd 'OHIF Medical Imaging Viewer/Viewers' && yarn tsc --noEmit"
+    formatter:
+      backend: false
+      frontend: true
+      tool: "Prettier (.prettierrc configured)"
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes (auth, DB schema, payment flows, nginx config)
+    - Identify affected modules — backend .py files, OHIF extension, nginx conf, or docker-compose
+    - Flag changes touching PHI (patient DICOM data) for extra scrutiny
+    - Note if change requires SSH deploy to imagiax.dev
+  specs:
+    - Use Given/When/Then format for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Medical workflows MUST specify error behavior (DICOM parse failure, AI timeout, payment fail)
+    - Security-sensitive specs MUST include revocation / deactivation scenarios
+  design:
+    - Include sequence diagrams for auth flows and AI analysis pipeline
+    - Document architecture decisions with rationale
+    - Consider impact on Orthanc PACS integration and OHIF viewer
+  tasks:
+    - Group tasks by phase (DB schema, backend logic, OHIF extension, nginx/deploy, testing)
+    - Use hierarchical numbering (1.1, 1.2, etc.)
+    - Keep tasks small enough to complete in one session
+    - Tag deploy tasks with [SSH] for remote execution
+  apply:
+    - Follow async/await pattern throughout (no sync DB calls — asyncpg only)
+    - Use Pydantic v2 BaseModel for all request/response models
+    - Rate limiter MUST be applied to any new public endpoint
+    - RBAC: always use Depends(get_current_user) and check role before data access
+    - Load sdd-apply skill before implementing
+  verify:
+    - Run py_compile on ALL modified .py files (syntax check — no pytest available)
+    - Frontend: run yarn lint + yarn tsc --noEmit for modified TS/TSX files
+    - Integration-test via test_login.py or curl against live server when available
+    - Compare implementation against every spec scenario
+  archive:
+    - Warn before merging destructive deltas (DB schema changes, auth changes, nginx changes)
+    - Record deployment steps if change requires SSH push
+
+# Active changes (as of 2026-04-04)
+active_changes:
+  - name: production-deployment
+    path: openspec/changes/production-deployment/
+    status: proposal+exploration only (no spec/tasks yet)
+    summary: "Deploy to imagiax.dev on Oracle Cloud — 6 critical blockers, 2 security vulns"
+  - name: security-audit
+    path: openspec/changes/security-audit/ AND sdd/security-audit/
+    status: exploration only (sdd/ dir has exploration.md)
+    summary: "27 security vulns — 4 phases from CRITICAL to LOW. Phases 1-4 partially done."
+  - name: verification-fixes
+    path: openspec/changes/verification-fixes/
+    status: verified (FAIL — resolved via comprehensive-hardening)
+    summary: "Security remediation verification. 13/14 PASS. T1.1 resolved: /auth/verify now checks usuarios.activo."
+

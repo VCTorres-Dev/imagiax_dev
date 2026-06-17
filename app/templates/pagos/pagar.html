@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IMAGIAX — Planes y Precios</title>
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #060b18; --surface: #0c1222; --surface2: #111827; --surface3: #1a2332;
+      --border: #1e293b; --border-hover: #334155; --text: #f1f5f9; --muted: #64748b; --muted2: #475569;
+      --blue: #3b82f6; --blue-dark: #1e40af; --blue-glow: rgba(59,130,246,.15);
+      --green: #22c55e; --green-dark: #166534; --amber: #f59e0b;
+      --purple: #8b5cf6; --radius: 14px;
+    }
+    body { background: var(--bg); color: var(--text);
+            font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            min-height: 100vh; overflow-x: hidden; }
+
+    /* ── Ambient background ─────────────────────────────────────────────── */
+    body::before { content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(ellipse 900px 560px at 50% -80px, rgba(59,130,246,.09), transparent);
+      pointer-events: none; z-index: 0; }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    .header {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(6,11,24,.85); backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
+      border-bottom: 1px solid rgba(30,41,59,.6);
+      padding: 0 28px; height: 60px;
+      display: flex; align-items: center; gap: 14px;
+    }
+    .header-logo {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--blue-dark), var(--purple));
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 800; color: #fff; letter-spacing: -0.5px;
+      box-shadow: 0 0 20px rgba(59,130,246,.25);
+    }
+    .header-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.3px; }
+    .header-subtitle { font-size: 10.5px; color: var(--muted); margin-top: 1px; letter-spacing: .2px; }
+    .header-nav { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .header-nav a {
+      color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500;
+      padding: 7px 14px; border-radius: 8px; border: 1px solid transparent;
+      transition: all .2s;
+    }
+    .header-nav a:hover { color: var(--text); border-color: var(--border); background: var(--surface); }
+
+    /* ── Tabs Navigation ───────────────────────────────────────────────── */
+    .tabs-container {
+      max-width: 980px; margin: 24px auto 0; padding: 0 20px;
+    }
+    .tabs-nav {
+      display: flex; gap: 4px; padding: 4px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; width: fit-content;
+    }
+    .tab-btn {
+      padding: 10px 24px; border: none; background: transparent;
+      color: var(--muted); font-size: 13px; font-weight: 600;
+      border-radius: 8px; cursor: pointer; transition: all .2s;
+      font-family: inherit;
+    }
+    .tab-btn:hover { color: var(--text); background: rgba(255,255,255,.03); }
+    .tab-btn.active {
+      background: var(--blue); color: white;
+      box-shadow: 0 2px 8px rgba(59,130,246,.25);
+    }
+    .tab-content { display: none; animation: fadeIn .3s ease; }
+    .tab-content.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* ── Banner ─────────────────────────────────────────────────────────── */
+    .banner-trial {
+      background: linear-gradient(135deg, #1c0a0a, #1a0505);
+      border: 1px solid rgba(127,29,29,.6); border-radius: 12px;
+      padding: 16px 20px; display: flex; align-items: center; gap: 14px;
+      margin-bottom: 24px;
+    }
+    .banner-trial.info { background: linear-gradient(135deg, #061a06, #0a1f0a); border-color: rgba(22,101,52,.5); }
+    .banner-trial strong { color: #fca5a5; }
+    .banner-trial.info strong { color: #86efac; }
+
+    /* ── Estado Panel (Mi cuenta) ──────────────────────────────────────── */
+    .estado-panel {
+      background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 24px 28px; margin-bottom: 24px;
+    }
+    .estado-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border);
+    }
+    .estado-panel-title { font-size: 16px; font-weight: 700; color: var(--text); }
+    .estado-panel-badge {
+      font-size: 10px; font-weight: 600; padding: 4px 10px; border-radius: 20px;
+      text-transform: uppercase; letter-spacing: .5px;
+    }
+    .estado-panel-badge.activo { background: rgba(34,197,94,.15); color: #86efac; }
+    .estado-panel-badge.trial { background: rgba(245,158,11,.15); color: #fbbf24; }
+    .estado-panel-badge.sin-creditos { background: rgba(239,68,68,.15); color: #fca5a5; }
+
+    .estado-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;
+    }
+    .estado-item {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+      padding: 18px 20px; position: relative; overflow: hidden;
+    }
+    .estado-item::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--item-accent, #334155), transparent);
+    }
+    .estado-item.accent-green { --item-accent: #22c55e; }
+    .estado-item.accent-blue  { --item-accent: #3b82f6; }
+    .estado-item.accent-amber { --item-accent: #f59e0b; }
+    .estado-item-label {
+      font-size: 11px; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px;
+    }
+    .estado-item-value {
+      font-size: 24px; font-weight: 800; color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    .estado-item-value.verde { color: #86efac; }
+    .estado-item-value.azul { color: #60a5fa; }
+    .estado-item-value.amarillo { color: #fbbf24; }
+    .estado-item-value.rojo { color: #fca5a5; }
+    .estado-item-detail {
+      font-size: 12px; color: var(--muted); margin-top: 6px;
+    }
+    .estado-prioridad {
+      margin-top: 20px; padding: 16px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 10px;
+      font-size: 12px; color: var(--muted); line-height: 1.6;
+    }
+    .estado-prioridad strong { color: var(--text); font-weight: 600; }
+
+    /* Alerta de creditos bajos */
+    .estado-alerta {
+      background: rgba(245,158,11,.1); border: 1px solid rgba(245,158,11,.3);
+      border-radius: 10px; padding: 14px 18px; margin-bottom: 20px;
+      font-size: 12px; color: #fbbf24; line-height: 1.5;
+    }
+    .estado-alerta.critico {
+      background: rgba(239,68,68,.1); border-color: rgba(239,68,68,.3); color: #fca5a5;
+    }
+    .estado-alerta strong { font-weight: 700; }
+
+    /* Boton cancelar suscripcion */
+    .btn-cancelar-sub {
+      margin-top: 10px; background: transparent; border: 1px solid rgba(239,68,68,.4);
+      color: #f87171; font-size: 11px; font-weight: 600; padding: 6px 12px;
+      border-radius: 6px; cursor: pointer; transition: all .2s;
+    }
+    .btn-cancelar-sub:hover { background: rgba(239,68,68,.15); border-color: #f87171; }
+
+    /* ── Historial Table ──────────────────────────────────────────────────── */
+    .historial-section {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+    }
+    .historial-header {
+      padding: 20px 24px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .historial-title { font-size: 16px; font-weight: 700; }
+    .historial-count { font-size: 12px; color: var(--muted); }
+    .historial-table { width: 100%; border-collapse: collapse; }
+    .historial-table th {
+      text-align: left; padding: 12px 16px; font-size: 10px; font-weight: 700;
+      color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
+      background: var(--bg); border-bottom: 1px solid var(--border);
+    }
+    .historial-table td {
+      padding: 14px 16px; font-size: 13px; border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .historial-table tr:last-child td { border-bottom: none; }
+    .historial-table tr:hover td { background: rgba(255,255,255,.02); }
+    .historial-fecha { color: var(--muted); font-family: monospace; font-size: 12px; }
+    .historial-desc { font-weight: 500; }
+    .historial-tipo { color: var(--muted); font-size: 12px; }
+    .historial-badge {
+      display: inline-block; padding: 4px 10px; border-radius: 20px;
+      font-size: 10px; font-weight: 600;
+    }
+    .historial-badge.aprobado { background: rgba(34,197,94,.15); color: #86efac; }
+    .historial-badge.pendiente { background: rgba(245,158,11,.15); color: #fbbf24; }
+    .historial-badge.rechazado { background: rgba(239,68,68,.15); color: #fca5a5; }
+    .historial-monto { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .historial-via { color: var(--muted); font-size: 11px; font-weight: 500; }
+    .historial-rut { color: var(--muted); font-size: 12px; font-family: monospace; }
+    .historial-empty {
+      padding: 48px 24px; text-align: center; color: var(--muted);
+    }
+    .historial-empty-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--text); }
+    .historial-empty-desc { font-size: 12px; }
+
+    /* ── Main ───────────────────────────────────────────────────────────── */
+    .main { max-width: 980px; margin: 0 auto; padding: 24px 20px 60px; position: relative; z-index: 1; }
+
+    .section-title { margin-bottom: 24px; }
+    .section-title h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.5px;
+                       background: linear-gradient(135deg, #f1f5f9, #94a3b8);
+                       -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .section-title p { color: var(--muted); font-size: 14px; margin-top: 6px; line-height: 1.6; }
+
+    .page-title { text-align: center; margin-bottom: 12px; }
+    .page-title h1 { font-size: 32px; font-weight: 800; letter-spacing: -0.5px;
+                       background: linear-gradient(135deg, #f1f5f9, #94a3b8);
+                       -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .page-title p { color: var(--muted); font-size: 15px; margin-top: 8px; line-height: 1.6; }
+
+    /* ── Plan Cards ────────────────────────────────────────────────────── */
+    .planes-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 28px; }
+    @media (max-width: 860px) { .planes-grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 480px) { .planes-grid { grid-template-columns: 1fr; } }
+
+    .plan-card {
+      background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 28px 22px; position: relative;
+      transition: all .25s cubic-bezier(.4,0,.2,1);
+      display: flex; flex-direction: column;
+    }
+    .plan-card:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-4px);
+      box-shadow: 0 12px 40px rgba(0,0,0,.3);
+    }
+    .plan-card.destacado {
+      border-color: rgba(59,130,246,.4);
+      background: linear-gradient(165deg, #0c1e3a 0%, var(--surface) 100%);
+      box-shadow: 0 0 40px rgba(59,130,246,.08);
+    }
+    .plan-card.destacado:hover {
+      border-color: var(--blue);
+      box-shadow: 0 0 50px rgba(59,130,246,.15), 0 12px 40px rgba(0,0,0,.3);
+    }
+
+    .badge { position: absolute; top: -11px; left: 50%; transform: translateX(-50%);
+              font-size: 9.5px; font-weight: 700; padding: 4px 14px; border-radius: 20px;
+              white-space: nowrap; text-transform: uppercase; letter-spacing: .8px;
+              box-shadow: 0 4px 12px rgba(0,0,0,.3); }
+    .badge { background: linear-gradient(135deg, #2563eb, #3b82f6); color: white; }
+    .badge.verde { background: linear-gradient(135deg, #16a34a, #22c55e); color: white; }
+
+    /* ── Plan card icon ────────────────────────────────────────────────── */
+    .plan-icon {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: rgba(59,130,246,.1); border: 1px solid rgba(59,130,246,.2);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 16px;
+    }
+    .plan-card.destacado .plan-icon {
+      background: rgba(59,130,246,.18); border-color: rgba(59,130,246,.35);
+      box-shadow: 0 0 16px rgba(59,130,246,.15);
+    }
+
+    /* Plan card top accent line */
+    .plan-card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(59,130,246,.2), transparent);
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+    .plan-card.destacado::before {
+      background: linear-gradient(90deg, transparent, var(--blue), transparent);
+    }
+
+    /* Unit price */
+    .plan-unit-price {
+      font-size: 11px; color: var(--muted); font-weight: 500;
+      margin-bottom: 12px; letter-spacing: .1px;
+    }
+
+    .plan-titulo { font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #e2e8f0; }
+
+    .plan-precio { display: flex; align-items: baseline; gap: 5px; margin-bottom: 12px; }
+    .precio-monto { font-size: 32px; font-weight: 800; color: var(--text);
+                     letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+    .precio-clp { font-size: 13px; color: var(--muted); font-weight: 500; }
+
+    .plan-desc { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-bottom: 20px; flex: 1; }
+
+    .plan-creditos {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px 14px; text-align: center; margin-bottom: 18px;
+    }
+    .credito-num { font-size: 24px; font-weight: 800; color: var(--blue); }
+    .credito-lbl { font-size: 11px; color: var(--muted); font-weight: 500; }
+
+    .btn-comprar {
+      width: 100%; border: none; border-radius: 10px; padding: 12px; font-size: 13px;
+      font-weight: 700; cursor: pointer; transition: all .2s;
+      background: linear-gradient(135deg, var(--blue-dark), var(--blue));
+      color: white; position: relative; overflow: hidden;
+    }
+    .btn-comprar::after { content: ''; position: absolute; inset: 0;
+      background: linear-gradient(135deg, transparent 40%, rgba(255,255,255,.1) 100%);
+      pointer-events: none; }
+    .btn-comprar:hover { opacity: .9; transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(59,130,246,.3); }
+
+    /* ── Pricing footer ────────────────────────────────────────────────── */
+    .pricing-footer {
+      text-align: center; margin-top: 36px;
+      display: flex; align-items: center; justify-content: center; gap: 16px;
+      flex-wrap: wrap;
+    }
+    .pricing-footer span {
+      display: inline-flex; align-items: center; gap: 5px;
+      color: var(--muted2); font-size: 12px; font-weight: 500;
+    }
+    .pricing-footer .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--muted2); }
+
+    /* ── Auto-pay Section ──────────────────────────────────────────────── */
+    .section-auto {
+      margin-top: 56px; padding-top: 40px;
+      border-top: 1px solid var(--border); position: relative;
+    }
+    .section-auto::before { content: ''; position: absolute; top: -1px; left: 50%;
+      transform: translateX(-50%); width: 120px; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--blue), transparent); }
+
+    .section-auto-title { text-align: center; margin-bottom: 28px; }
+    .section-auto-title h2 {
+      font-size: 24px; font-weight: 800; letter-spacing: -0.3px;
+      background: linear-gradient(135deg, #f1f5f9, #94a3b8);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .section-auto-title p { color: var(--muted); font-size: 14px; margin-top: 6px; }
+
+    .features-row {
+      display: flex; gap: 24px; justify-content: center; margin-top: 14px; flex-wrap: wrap;
+    }
+    .feature-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 14px; font-size: 12px; color: var(--muted); font-weight: 500;
+    }
+    .feature-chip svg { flex-shrink: 0; }
+
+    /* ── Oneclick badge ───────────────────────────────────────────────── */
+    .oneclick-badge {
+      border-color: rgba(22,101,52,.5) !important;
+      background: linear-gradient(135deg, #0a1f0a, #0c1c1c) !important;
+    }
+    .oneclick-badge .card-badge-detail { color: #86efac !important; }
+
+    /* ── Card Form ─────────────────────────────────────────────────────── */
+    .card-form-wrapper {
+      max-width: 460px; margin: 0 auto;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 16px;
+      padding: 32px 28px; position: relative; overflow: hidden;
+    }
+    .card-form-wrapper::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, var(--blue-dark), var(--blue), var(--purple)); }
+
+    .card-form-title { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+    .card-form-subtitle { font-size: 12px; color: var(--muted); margin-bottom: 24px; line-height: 1.5; }
+
+    .form-group { margin-bottom: 16px; }
+    .form-label { display: block; font-size: 11px; font-weight: 600; color: #93c5fd;
+                   text-transform: uppercase; letter-spacing: .6px; margin-bottom: 7px; }
+    .form-input {
+      width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 11px 14px; font-size: 13px; color: var(--text); outline: none;
+      transition: all .2s; font-family: inherit;
+    }
+    .form-input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(59,130,246,.1); }
+    .form-input::placeholder { color: var(--muted2); }
+
+    /* Verificar pago input row */
+    .verificar-input-row {
+      display: flex; gap: 12px; align-items: stretch;
+    }
+    .verificar-input {
+      flex: 1; min-width: 0;
+    }
+    .btn-verificar {
+      width: auto; padding: 12px 24px; white-space: nowrap; flex-shrink: 0;
+    }
+    @media (max-width: 500px) {
+      .verificar-input-row {
+        flex-direction: column; gap: 10px;
+      }
+      .btn-verificar {
+        width: 100%;
+      }
+    }
+
+    .consent-box {
+      background: rgba(6,11,24,.6); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 16px; font-size: 12px; color: var(--muted); line-height: 1.6;
+      margin-bottom: 16px; display: flex; gap: 12px; align-items: flex-start;
+    }
+    .consent-box input[type=checkbox] { margin-top: 3px; accent-color: var(--blue); flex-shrink: 0;
+      width: 16px; height: 16px; cursor: pointer; }
+    .consent-box label { cursor: pointer; }
+
+    .btn-registrar {
+      width: 100%; border: none; border-radius: 10px; padding: 13px; font-size: 14px;
+      font-weight: 700; cursor: pointer; transition: all .2s;
+      background: linear-gradient(135deg, var(--green-dark), var(--green)); color: white;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    .btn-registrar:hover { opacity: .9; box-shadow: 0 6px 20px rgba(34,197,94,.25); }
+    .btn-registrar:disabled { opacity: .35; cursor: not-allowed; box-shadow: none; }
+
+    .card-registered-badge {
+      background: linear-gradient(135deg, #061a06, #0a1f0a);
+      border: 1px solid rgba(22,101,52,.5); border-radius: 14px;
+      padding: 18px 20px; display: flex; align-items: center; gap: 14px;
+      max-width: 460px; margin: 0 auto;
+    }
+    .card-registered-badge > div { flex: 1; }
+    .card-badge-brand { font-size: 15px; font-weight: 700; color: var(--green); }
+    .card-badge-detail { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .btn-borrar-tarjeta {
+      background: transparent; border: 1px solid rgba(127,29,29,.5); border-radius: 8px;
+      padding: 6px 14px; color: #f87171; cursor: pointer; font-size: 11px;
+      font-weight: 600; flex-shrink: 0; transition: all .2s;
+    }
+    .btn-borrar-tarjeta:hover { background: rgba(127,29,29,.15); border-color: #991b1b; }
+
+    /* ── Security badge ────────────────────────────────────────────────── */
+    .security-badge {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-top: 16px; color: var(--muted2); font-size: 11px; font-weight: 500;
+    }
+    .security-badge svg { opacity: .6; }
+
+    /* ── Modal ──────────────────────────────────────────────────────────── */
+    .modal-overlay { display: none; position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,.6); backdrop-filter: blur(6px);
+      align-items: center; justify-content: center; padding: 16px; }
+    .modal-overlay.visible { display: flex; }
+    .modal {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 18px;
+      padding: 32px; max-width: 440px; width: 100%;
+      box-shadow: 0 24px 80px rgba(0,0,0,.5);
+      animation: modalIn .25s ease-out;
+    }
+    @keyframes modalIn { from { opacity: 0; transform: translateY(12px) scale(.97); }
+                          to { opacity: 1; transform: translateY(0) scale(1); } }
+    .modal-title { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
+    .modal-subtitle { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
+    .modal-actions { display: flex; gap: 10px; margin-top: 22px; }
+    .btn-modal-cancel { flex: 1; background: transparent; color: var(--muted); border: 1px solid var(--border);
+      border-radius: 10px; padding: 11px; font-size: 13px; cursor: pointer; transition: all .2s; font-family: inherit; }
+    .btn-modal-cancel:hover { border-color: var(--border-hover); color: var(--text); }
+    .btn-modal-submit { flex: 2; background: linear-gradient(135deg, var(--blue-dark), var(--blue));
+      color: white; border: none; border-radius: 10px; padding: 11px; font-size: 13px;
+      font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; }
+    .btn-modal-submit:disabled { opacity: .4; cursor: not-allowed; }
+    .error-msg { color: #f87171; font-size: 12px; margin-top: 10px; display: none;
+      background: rgba(69,10,10,.4); padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(127,29,29,.3); }
+
+    .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3);
+      border-top-color: white; border-radius: 50%; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Page footer ───────────────────────────────────────────────────── */
+    .page-footer {
+      margin-top: 56px; text-align: center; color: var(--muted2); font-size: 11px;
+      letter-spacing: .3px; padding-bottom: 20px;
+    }
+
+    /* ── Responsive ────────────────────────────────────────────────────── */
+    @media (max-width: 768px) {
+      .tabs-nav { width: 100%; }
+      .tab-btn { flex: 1; text-align: center; padding: 10px 12px; font-size: 12px; }
+      .historial-table { font-size: 12px; }
+      .historial-table th, .historial-table td { padding: 10px 12px; }
+    }
+    @media (max-width: 480px) {
+      /* RESP-M2: was incorrectly forcing 2 cols at 480px — now 1 col for better readability */
+      .planes-grid { grid-template-columns: 1fr; }
+      .main { padding: 20px 14px 48px; }
+      .section-title h1 { font-size: 22px; }
+      .card-form-wrapper { padding: 24px 18px; }
+      .estado-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 360px) {
+      .planes-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+{{ test_badge | safe }}
+
+<header class="header">
+  <div class="header-logo">IX</div>
+  <div style="flex:1">
+    <div class="header-title">IMAGIAX</div>
+    <div class="header-subtitle">An&aacute;lisis de im&aacute;genes m&eacute;dicas con IA</div>
+  </div>
+  <nav class="header-nav">
+    <a href="{{ viewer_url }}">Visor DICOM</a>
+  </nav>
+</header>
+
+<!-- Tabs Navigation -->
+<div class="tabs-container">
+  <div class="tabs-nav">
+    <button class="tab-btn active" onclick="cambiarTab('planes')">Planes</button>
+    <button class="tab-btn" onclick="cambiarTab('cuenta')">Mi cuenta</button>
+    <button class="tab-btn" onclick="cambiarTab('historial')">Historial</button>
+  </div>
+</div>
+
+<main class="main">
+  <!-- TAB: Planes -->
+  <div id="tab-planes" class="tab-content active">
+    {{ banner | safe }}
+
+    <div class="page-title">
+      <h1>Planes para centros m&eacute;dicos</h1>
+      <p>Paga solo lo que usas. Sin contratos de permanencia. Cancela cuando quieras.</p>
+    </div>
+
+    <div class="planes-grid">
+      {{ planes | safe }}
+    </div>
+
+    <div class="pricing-footer">
+      <span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Pago seguro
+      </span>
+      <span class="dot"></span>
+      <span>CLP (Peso chileno)</span>
+      <span class="dot"></span>
+      <span>IVA incluido</span>
+      <span class="dot"></span>
+      <span>
+        <strong style="color:var(--muted)">MercadoPago</strong>
+      </span>
+    </div>
+
+  </div><!-- /tab-planes -->
+
+  <!-- TAB: Mi cuenta -->
+  <div id="tab-cuenta" class="tab-content">
+    <div class="section-title">
+      <h1>Mi cuenta</h1>
+      <p>Administra tu suscripcion, creditos y metodo de pago.</p>
+    </div>
+    {{ estado_panel | safe }}
+
+    <!-- Seccion Pago Automatico (movida aqui) -->
+    <section class="section-auto" style="margin-top:32px;padding-top:32px">
+      <div class="section-auto-title">
+        <h2>Pago por uso autom&aacute;tico</h2>
+        <p>Registra tu tarjeta una sola vez. Se cobra <strong style="color:var(--text)">$990 CLP</strong> de forma autom&aacute;tica por cada informe generado.</p>
+        <div class="features-row">
+          <div class="feature-chip">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            Sin recargas manuales
+          </div>
+          <div class="feature-chip">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Ideal para uso intensivo
+          </div>
+          <div class="feature-chip">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12l2 2 4-4"/></svg>
+            Cancela cuando quieras
+          </div>
+        </div>
+      </div>
+
+      {{ tarjeta_registrada | safe }}
+      {{ oneclick_registrada | safe }}
+
+      <!-- Formulario de inscripcion Oneclick (Transbank) -->
+      <div id="oneclick-form-section" style="{{ oneclick_form_display }}">
+        <div class="card-form-wrapper" style="margin-top:16px">
+          <div class="card-form-title">Cobro 1-Click con Transbank Oneclick</div>
+          <div class="card-form-subtitle">
+            Inscribe tu tarjeta una sola vez en el portal seguro de Transbank.
+            Cada informe se cobra autom&aacute;ticamente sin intervenci&oacute;n &mdash; sin CVV, sin pop-ups, sin salir de la p&aacute;gina.
+          </div>
+          <form id="oneclick-form" onsubmit="return iniciarOneclick(event)">
+            <div class="form-group">
+              <label class="form-label" for="oc-email">Correo electr&oacute;nico</label>
+              <input id="oc-email" class="form-input" type="email" placeholder="doctor@clinica.cl" autocomplete="email" required>
+            </div>
+            <div class="consent-box">
+              <input type="checkbox" id="oc-consent" required>
+              <label for="oc-consent">
+                Autorizo a <strong>IMAGIAX</strong> a realizar cargos autom&aacute;ticos de <strong>$990 CLP</strong>
+                a mi tarjeta por cada informe generado. Puedo desvincular mi tarjeta en cualquier momento.
+              </label>
+            </div>
+            <div id="oc-error" class="error-msg"></div>
+            <button type="submit" class="btn-registrar" id="btn-oneclick">
+              <span id="btn-oc-text">Inscribir tarjeta en Transbank</span>
+              <span id="btn-oc-spinner" class="spinner" style="display:none"></span>
+            </button>
+            <div class="security-badge">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              Pago seguro &middot; Procesado por Transbank &middot; Tarjeta protegida
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+  </div><!-- /tab-cuenta -->
+
+  <!-- TAB: Historial -->
+  <div id="tab-historial" class="tab-content">
+    <div class="section-title">
+      <h1>Historial de transacciones</h1>
+      <p>Registro completo de tus compras e informes generados.</p>
+    </div>
+    <div id="tab-h-loading" style="text-align:center;padding:40px;color:var(--muted);font-size:13px">Cargando...</div>
+    <div id="tab-h-content" style="display:none">
+      <div class="historial-section">
+        <div class="historial-header">
+          <div class="historial-title">Todas las transacciones</div>
+          <div class="historial-count" id="tab-h-count">&mdash;</div>
+        </div>
+        <table class="historial-table">
+          <thead>
+            <tr>
+              <th>Fecha</th><th>Descripci&oacute;n</th><th>Tipo</th>
+              <th>Estado</th><th>Monto</th><th>V&iacute;a</th><th>RUT</th>
+            </tr>
+          </thead>
+          <tbody id="tab-h-tbody"></tbody>
+        </table>
+      </div>
+      <div style="text-align:right;margin-top:12px">
+        <a href="{{ api_base }}/historial" style="color:var(--muted);font-size:12px;text-decoration:none;transition:color .2s"
+           onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">
+          Ver historial completo &rarr;
+        </a>
+      </div>
+    </div>
+    <div id="tab-h-error" style="display:none;text-align:center;padding:40px;color:#f87171;font-size:13px">Error al cargar historial.</div>
+  </div><!-- /tab-historial -->
+
+  <div class="page-footer">IMAGIAX — Plataforma de an&aacute;lisis radiol&oacute;gico con IA</div>
+</main>
+
+<!-- Modal de datos del comprador -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <div class="modal-title" id="modal-plan-titulo">Completar compra</div>
+    <div class="modal-subtitle">Ingresa los datos del centro m&eacute;dico para proceder al pago</div>
+
+    <div class="form-group">
+      <label class="form-label" for="inp-email">Correo electr&oacute;nico</label>
+      <input id="inp-email" class="form-input" type="email" placeholder="admin@centromedico.cl" autocomplete="email" required>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="inp-centro">Nombre del centro m&eacute;dico</label>
+      <input id="inp-centro" class="form-input" type="text" placeholder="Cl&iacute;nica San Mart&iacute;n" autocomplete="organization" required>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="inp-nombre">Nombre de contacto <span style="color:var(--muted2)">(opcional)</span></label>
+      <input id="inp-nombre" class="form-input" type="text" placeholder="Dr. Juan P&eacute;rez" autocomplete="name">
+    </div>
+
+    <div id="error-msg" class="error-msg"></div>
+
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" onclick="cerrarModal()">Cancelar</button>
+      <button class="btn-modal-submit" id="btn-submit" onclick="procesarPago()">
+        <span id="btn-submit-text">Ir a pagar con</span>
+        <span id="btn-spinner" class="spinner" style="display:none"></span>
+        <strong id="btn-mp-logo">MercadoPago &rarr;</strong>
+      </button>
+    </div>
+
+    <div class="security-badge" style="margin-top:14px;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Pago 100% seguro &middot; Tarjetas de cr&eacute;dito, d&eacute;bito y cuenta MercadoPago
+    </div>
+  </div>
+</div>
+
+<!-- MercadoPago SDK v2 -->
+<script src="https://sdk.mercadopago.com/js/v2"></script>
+
+<script>
+  let planSeleccionado = null;
+  const apiBase = "{{ api_base }}";
+  const mpPublicKey = "{{ mp_public_key }}";
+
+  // ── Tab Navigation ───────────────────────────────────────────────────────────
+  function cambiarTab(tabId) {
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelector(`[onclick="cambiarTab('${tabId}')"]`).classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+    document.getElementById('tab-' + tabId).classList.add('active');
+    history.replaceState(null, '', '#' + tabId);
+    if (tabId === 'historial') loadHistorialTab();
+  }
+
+  // ── Historial Tab: carga desde la misma API que /historial ───────────────────
+  let _historialTabLoaded = false;
+  function loadHistorialTab() {
+    if (_historialTabLoaded) return;
+    const tiposMap = {scan_automatico:'Cobro por informe', pago_unico:'Pago \u00fanico',
+      suscripcion:'Suscripci\u00f3n', pack:'Pack', pack_50:'Pack 50 Informes',
+      pack_individual:'Escaneo Individual', trial:'Trial'};
+    const estadosMap = {approved:'Aprobado', rejected:'Rechazado', pending:'Pendiente', error:'Error'};
+    const estadosCls = {approved:'aprobado', rejected:'rechazado', pending:'pendiente', error:'rechazado'};
+    const origenesMap = {mercadopago:'MP', transbank:'TBK'};
+    const fdate = iso => {
+      const d = new Date(iso);
+      return d.toLocaleDateString('es-CL', {day:'2-digit', month:'short', year:'numeric'})
+           + ' ' + d.toLocaleTimeString('es-CL', {hour:'2-digit', minute:'2-digit'});
+    };
+    fetch(apiBase+'/pagos/historial-cobros?periodo=total')
+      .then(r => r.json())
+      .then(data => {
+        const cobros = data.cobros || [];
+        document.getElementById('tab-h-count').textContent = cobros.length + ' registros';
+        const tbody = document.getElementById('tab-h-tbody');
+        if (!cobros.length) {
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted)">Sin transacciones</td></tr>';
+        } else {
+          tbody.innerHTML = cobros.map(c => '<tr>'
+            + '<td class="historial-fecha">' + fdate(c.created_at) + '</td>'
+            + '<td class="historial-desc">' + (c.descripcion || tiposMap[c.tipo] || c.tipo || '&mdash;') + '</td>'
+            + '<td class="historial-tipo">' + (tiposMap[c.tipo] || c.tipo || '') + '</td>'
+            + '<td><span class="historial-badge ' + (estadosCls[c.estado] || 'rechazado') + '">'
+            + (estadosMap[c.estado] || c.estado) + '</span></td>'
+            + '<td class="historial-monto">$' + Number(c.monto_clp).toLocaleString('es-CL') + '</td>'
+            + '<td class="historial-via">' + (origenesMap[c.origen] || c.origen || 'MP') + '</td>'
+            + '<td class="historial-rut">' + (c.patient_id || '&mdash;') + '</td>'
+            + '</tr>').join('');
+        }
+        document.getElementById('tab-h-loading').style.display = 'none';
+        document.getElementById('tab-h-content').style.display = 'block';
+        _historialTabLoaded = true;
+      })
+      .catch(() => {
+        document.getElementById('tab-h-loading').style.display = 'none';
+        document.getElementById('tab-h-error').style.display = 'block';
+      });
+  }
+  // Load tab from URL hash on page load
+  document.addEventListener('DOMContentLoaded', () => {
+    const hash = window.location.hash.slice(1);
+    if (['planes', 'cuenta', 'historial'].includes(hash)) {
+      cambiarTab(hash);
+    }
+  });
+
+  // ── Oneclick Inscription (Transbank) ────────────────────────────────────────
+  function iniciarOneclick(e) {
+    e.preventDefault();
+    const email = document.getElementById('oc-email').value.trim();
+    if (!email) return;
+    const btn = document.getElementById('btn-oneclick');
+    const spinner = document.getElementById('btn-oc-spinner');
+    const text = document.getElementById('btn-oc-text');
+    const errEl = document.getElementById('oc-error');
+    btn.disabled = true;
+    text.textContent = 'Conectando con Transbank...';
+    spinner.style.display = 'inline-block';
+    errEl.style.display = 'none';
+
+    fetch(apiBase + '/tbk/inscribir/iniciar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: email, email: email }),
+    })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.detail || 'Error al iniciar inscripcion');
+      window.location.href = data.redirect_url;
+    })
+    .catch(err => {
+      errEl.textContent = err.message;
+      errEl.style.display = 'block';
+      btn.disabled = false;
+      text.textContent = 'Inscribir tarjeta en Transbank';
+      spinner.style.display = 'none';
+    });
+    return false;
+  }
+
+  // ── Borrar Oneclick ─────────────────────────────────────────────────────────
+  async function borrarOneclick() {
+    if (!confirm('Desvincular tarjeta Oneclick?')) return;
+    try {
+      const st = await fetch(apiBase + '/tbk/estado').then(r => r.json());
+      const user = st.username || 'default_user';
+      await fetch(apiBase + '/tbk/tarjeta', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user }),
+      });
+      window.location.reload();
+    } catch(e) {
+      alert('Error al desvincular: ' + e.message);
+    }
+  }
+
+  // ── MP Card Form — ELIMINADO ─────────────────────────────────────────────────
+  // El pago automático ahora se gestiona exclusivamente con Transbank Oneclick.
+  // MercadoPago se usa solo para comprar packs y suscripciones (checkout estándar).
+  const mp = new MercadoPago(mpPublicKey, { locale: 'es-CL' });
+
+  // Mantener borrarTarjeta para tarjetas MP legacy que ya estén registradas
+  async function borrarTarjeta() {
+    if (!confirm("Eliminar la tarjeta MercadoPago guardada? Los cobros automáticos pasarán a usar Oneclick si está inscrito.")) return;
+    try {
+      const res = await fetch(apiBase + "/pagos/metodo-pago", { method: "DELETE" });
+      if (!res.ok) throw new Error("Error al eliminar la tarjeta");
+      window.location.reload();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  // Cancelar suscripción activa
+  async function cancelarSuscripcion() {
+    if (!confirm("Cancelar tu suscripcion mensual? Los creditos restantes seguiran disponibles hasta agotarse.")) return;
+    try {
+      const res = await fetch(apiBase + "/pagos/cancelar-suscripcion", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Error al cancelar");
+      alert(data.mensaje || "Suscripcion cancelada correctamente.");
+      window.location.reload();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  // ── Modal Planes (packs / suscripción) ───────────────────────────────────────
+  function seleccionarPlan(planId) {
+    planSeleccionado = planId;
+    const titulos = {
+      pack_individual: "Escaneo Individual — $990 CLP",
+      pack_50: "Pack 50 Informes — $24.990 CLP",
+      pack_200: "Pack 200 Informes — $69.990 CLP",
+      suscripcion_mensual: "Suscripción Mensual — $79.990 CLP/mes",
+    };
+    document.getElementById("modal-plan-titulo").textContent = titulos[planId] || "Completar compra";
+    document.getElementById("error-msg").style.display = "none";
+    document.getElementById("modal").classList.add("visible");
+    setTimeout(() => document.getElementById("inp-email").focus(), 100);
+  }
+
+  function cerrarModal() {
+    document.getElementById("modal").classList.remove("visible");
+    planSeleccionado = null;
+  }
+
+  async function procesarPago() {
+    const email = document.getElementById("inp-email").value.trim();
+    const centro = document.getElementById("inp-centro").value.trim();
+    const nombre = document.getElementById("inp-nombre").value.trim();
+    const errEl = document.getElementById("error-msg");
+
+    if (!email || !/^[^@]+@[^@]+\\.[^@]+$/.test(email)) {
+      errEl.textContent = "Por favor ingresa un correo electrónico válido.";
+      errEl.style.display = "block";
+      return;
+    }
+    if (!centro) {
+      errEl.textContent = "Por favor ingresa el nombre del centro médico.";
+      errEl.style.display = "block";
+      return;
+    }
+
+    errEl.style.display = "none";
+    const btn = document.getElementById("btn-submit");
+    btn.disabled = true;
+    document.getElementById("btn-submit-text").textContent = "Procesando...";
+    document.getElementById("btn-spinner").style.display = "inline-block";
+    document.getElementById("btn-mp-logo").style.display = "none";
+
+    try {
+      const res = await fetch(apiBase + "/pagos/crear-sesion", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          plan_id: planSeleccionado,
+          email: email,
+          centro_medico: centro,
+          nombre_contacto: nombre || null
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.checkout_url) {
+        throw new Error(data.detail || "Error al crear la sesión de pago");
+      }
+      window.location.href = data.checkout_url;
+    } catch (err) {
+      errEl.textContent = err.message || "Error de conexión. Intente nuevamente.";
+      errEl.style.display = "block";
+      btn.disabled = false;
+      document.getElementById("btn-submit-text").textContent = "Ir a pagar con";
+      document.getElementById("btn-spinner").style.display = "none";
+      document.getElementById("btn-mp-logo").style.display = "inline";
+    }
+  }
+
+  // Cerrar modal al hacer click fuera
+  document.getElementById("modal").addEventListener("click", function(e) {
+    if (e.target === this) cerrarModal();
+  });
+
+  // Enter en campos para enviar
+  ["inp-email","inp-centro","inp-nombre"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("keydown", e => {
+      if (e.key === "Enter") procesarPago();
+    });
+  });
+</script>
+</body>
+</html>
