@@ -30,8 +30,23 @@ OHIF Medical Imaging Viewer/
 .vscode/
 .idea/
 
-# Experimental
+# Experimental y archivos de desarrollo
 v2_experimental/
+archive/
+research/
+scripts/
+
+# Archivos de análisis y reportes
+*.xlsx
+*.png
+*.jpg
+*.jpeg
+*.txt
+!requirements.txt
+README.md
+INICIAR-IMAGIAX.bat
+DETENER-IMAGIAX.bat
+skills-lock.json
 
 # Env files (se montan via env_file en compose)
 .env

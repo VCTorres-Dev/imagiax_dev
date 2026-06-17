@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block title %}Mi Plantilla — IMAGIAX{% endblock %}
+
+{% block extra_styles %}
+<style>
+  .plantilla-wrap { max-width: 560px; margin: 0 auto; padding: 32px 20px; }
+  .plantilla-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 20px; padding: 36px 32px; box-shadow: 0 24px 64px rgba(0,0,0,.4);
+    position: relative; overflow: hidden;
+  }
+  .plantilla-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--blue), transparent);
+  }
+  .plantilla-title { font-size: 22px; font-weight: 800; letter-spacing: -.4px; margin-bottom: 4px; }
+  .plantilla-subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .form-group { margin-bottom: 18px; }
+  .form-label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .4px; }
+  .form-input {
+    width: 100%; padding: 10px 14px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--text); font-size: 14px; transition: border-color .2s;
+  }
+  .form-input:focus { outline: none; border-color: var(--blue); }
+  .form-input::placeholder { color: var(--muted2); }
+  .btn-row { display: flex; gap: 10px; margin-top: 24px; }
+  .btn-save {
+    background: linear-gradient(135deg, var(--blue-dark), var(--blue)); color: white;
+    border: none; border-radius: 10px; padding: 11px 26px; font-size: 13px; font-weight: 700;
+    cursor: pointer; transition: all .2s; letter-spacing: -.1px;
+  }
+  .btn-save:hover { opacity: .9; transform: translateY(-1px); }
+  .btn-save:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+  .btn-reset {
+    background: transparent; color: var(--red); border: 1px solid rgba(248,113,113,.3);
+    border-radius: 10px; padding: 11px 20px; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all .2s;
+  }
+  .btn-reset:hover { border-color: var(--red); background: rgba(248,113,113,.08); }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
+    padding: 12px 24px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    opacity: 0; transition: all .35s; z-index: 9999; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.success { background: var(--green-dark); color: #fff; }
+  .toast.error { background: var(--red-dark); color: #fff; }
+  .file-hint { font-size: 11px; color: var(--muted2); margin-top: 4px; }
+
+  /* ── Nav bar ── */
+  .plantilla-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 0 24px; max-width: 560px; margin: 0 auto;
+  }
+  .plantilla-nav-logo {
+    width: 32px; height: 32px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--blue-dark), #6d28d9);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 800; color: #fff; letter-spacing: -.5px;
+    box-shadow: 0 0 20px rgba(59,130,246,.3);
+  }
+  .plantilla-nav-links { display: flex; gap: 12px; }
+  .plantilla-nav-links a {
+    color: var(--muted); font-size: 13px; text-decoration: none; font-weight: 500;
+    transition: color .2s;
+  }
+  .plantilla-nav-links a:hover { color: var(--text); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-center">
+  <div class="plantilla-wrap">
+    <!-- Nav -->
+    <nav class="plantilla-nav">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="plantilla-nav-logo">IX</div>
+        <span style="font-size:14px;font-weight:700;">IMAGIAX</span>
+      </div>
+      <div class="plantilla-nav-links">
+        <a href="{{ viewer_url }}">Visor</a>
+        <a href="{{ pagar_url }}">Planes</a>
+      </div>
+    </nav>
+
+    <!-- Card -->
+    <div class="plantilla-card">
+      <div class="plantilla-title">Mi Plantilla</div>
+      <div class="plantilla-subtitle">Personaliza la marca que aparece en tus informes médicos</div>
+
+      <form id="branding-form" onsubmit="return saveBranding(event)">
+        <div class="form-group">
+          <label class="form-label" for="brand_name">Nombre de marca</label>
+          <input class="form-input" id="brand_name" name="brand_name" type="text"
+                 placeholder="Ej: Clínica San Rafael" maxlength="100"
+                 value="{{ branding.brand_name or '' }}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="brand_subtitle">Subtítulo</label>
+          <input class="form-input" id="brand_subtitle" name="brand_subtitle" type="text"
+                 placeholder="Ej: Centro de diagnóstico por imágenes" maxlength="200"
+                 value="{{ branding.brand_subtitle or '' }}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="doctor_name">Nombre del médico</label>
+          <input class="form-input" id="doctor_name" name="doctor_name" type="text"
+                 placeholder="Ej: Dra. María González" maxlength="200"
+                 value="{{ branding.doctor_name or '' }}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="doctor_specialty">Especialidad</label>
+          <input class="form-input" id="doctor_specialty" name="doctor_specialty" type="text"
+                 placeholder="Ej: Radiología" maxlength="200"
+                 value="{{ branding.doctor_specialty or '' }}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="doctor_license">Número de licencia</label>
+          <input class="form-input" id="doctor_license" name="doctor_license" type="text"
+                 placeholder="Ej: 12345" maxlength="50"
+                 value="{{ branding.doctor_license or '' }}">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="logo_file">Logo (imagen)</label>
+          <input class="form-input" id="logo_file" name="logo_file" type="file" accept="image/*">
+          <div class="file-hint">Máximo 512 KiB. Se codifica en base64 para el informe.</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="signature_file">Firma (imagen)</label>
+          <input class="form-input" id="signature_file" name="signature_file" type="file" accept="image/*">
+          <div class="file-hint">Máximo 256 KiB. Se codifica en base64 para el informe.</div>
+        </div>
+
+        <div class="btn-row">
+          <button type="submit" class="btn-save" id="save-btn">Guardar cambios</button>
+          <button type="button" class="btn-reset" onclick="resetBranding()">Desactivar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+const API_BASE = "{{ api_base }}";
+
+function showToast(msg, type = "success") {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast " + type;
+  requestAnimationFrame(() => t.classList.add("show"));
+  setTimeout(() => t.classList.remove("show"), 3000);
+}
+
+function fileToBase64(file, maxBytes) {
+  return new Promise((resolve, reject) => {
+    if (!file) { resolve(null); return; }
+    if (file.size > maxBytes) {
+      reject(new Error(file.name + " excede el límite de " + (maxBytes / 1024) + " KiB"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      // Strip the data URL prefix: "data:image/png;base64,"
+      const b64 = reader.result.split(",")[1];
+      resolve(b64 || null);
+    };
+    reader.onerror = () => reject(new Error("Error leyendo " + file.name));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function saveBranding(e) {
+  e.preventDefault();
+  const btn = document.getElementById("save-btn");
+  btn.disabled = true;
+  btn.textContent = "Guardando...";
+
+  const body = {
+    brand_name: document.getElementById("brand_name").value || null,
+    brand_subtitle: document.getElementById("brand_subtitle").value || null,
+    doctor_name: document.getElementById("doctor_name").value || null,
+    doctor_specialty: document.getElementById("doctor_specialty").value || null,
+    doctor_license: document.getElementById("doctor_license").value || null,
+  };
+
+  try {
+    const logoFile = document.getElementById("logo_file").files[0];
+    const sigFile = document.getElementById("signature_file").files[0];
+    body.logo_b64 = await fileToBase64(logoFile, 512 * 1024);
+    body.signature_b64 = await fileToBase64(sigFile, 256 * 1024);
+
+    // Remove null keys so partial update works
+    Object.keys(body).forEach(k => { if (body[k] === null) delete body[k]; });
+
+    const resp = await fetch(API_BASE + "/me/branding", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || "Error al guardar");
+    }
+    showToast("Configuración guardada");
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Guardar cambios";
+  }
+  return false;
+}
+
+async function resetBranding() {
+  if (!confirm("¿Desactivar tu configuración de plantilla? Los datos se conservan pero no se mostrarán.")) return;
+  try {
+    const resp = await fetch(API_BASE + "/me/branding", {
+      method: "DELETE",
+      credentials: "include",
+    });
+    if (!resp.ok && resp.status !== 404) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || "Error al desactivar");
+    }
+    showToast("Plantilla desactivada. Recarga para ver el cambio.");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+</script>
+{% endblock %}

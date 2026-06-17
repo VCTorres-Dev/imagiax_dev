@@ -12,9 +12,12 @@ python-multipart==0.0.20
 httpx==0.28.1
 python-dotenv==1.2.2
 pydantic==2.12.5
+pydantic-settings==2.14.0
+Jinja2==3.1.6
 pydicom==3.0.1
 asyncpg==0.31.0
 google-genai==1.66.0
+PyYAML==6.0.2
 
 # Procesamiento de imágenes — headless para entorno Docker sin display
 opencv-python-headless==4.13.0.92
@@ -31,5 +34,11 @@ grad-cam==1.5.5
 mercadopago==2.3.0
 transbank-sdk==6.1.0
 
+# Autenticación JWT
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
 # Exportación de reportes
+fpdf2==2.8.5
 openpyxl==3.1.5
