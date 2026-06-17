@@ -525,6 +525,8 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
             logger.info("IMAGIAX Auth: branding_config not yet created — clinic_id ALTER skipped (will be created by owning module).")
 
         if await _table_exists(conn, "analysis_jobs"):
+            # clinic_id MUST be added before soft-dedup columns and before any
+            # future unique index that references it. See migrations/005 for context.
             await conn.execute(
                 "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID"
             )
@@ -540,17 +542,19 @@ async def create_auth_tables(pool: asyncpg.Pool) -> None:
             await conn.execute(
                 "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS deduped_reason TEXT"
             )
-            # PARTIAL unique index: only enforces uniqueness on non-deduped rows.
-            # Production has 5 historical terminal-duplicate groups (41 rows, 0 active).
-            # A total unique index would fail on production. This partial index, combined
-            # with the existing idx_analysis_jobs_pending_dedup, provides full coverage:
-            # - pending/running dedup: idx_analysis_jobs_pending_dedup (existing)
-            # - all non-deduped:       analysis_jobs_study_user_clinic_uniq (this index)
-            await conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS analysis_jobs_study_user_clinic_uniq "
-                "ON analysis_jobs (study_instance_uid, usuario_id, clinic_id) "
-                "WHERE deduped_at IS NULL"
-            )
+            # ─── POST-REMEDIATION: DO NOT CREATE analysis_jobs_study_user_clinic_uniq HERE ───
+            # Production has 5 historical terminal-duplicate groups (41 rows, 0 active)
+            # whose deduped_at is still NULL. Creating a partial unique index:
+            #   CREATE UNIQUE INDEX ... ON analysis_jobs (...) WHERE deduped_at IS NULL
+            # would fail immediately because those rows violate uniqueness.
+            #
+            # The unique index MUST be created in a SEPARATE post-remediation step
+            # AFTER deterministic soft-dedup marks all non-canonical rows with
+            # deduped_at. Until then, the existing idx_analysis_jobs_pending_dedup
+            # (WHERE status IN ('pending','running')) guards concurrent inserts.
+            #
+            # See migrations/005_tenant_remediation_schema.sql for the full context
+            # and the post-remediation index creation SQL.
         else:
             logger.info("IMAGIAX Auth: analysis_jobs not yet created — clinic_id ALTER skipped.")
 

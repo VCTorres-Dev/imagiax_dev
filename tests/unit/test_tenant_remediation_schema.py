@@ -2,13 +2,15 @@
 Unit tests for tenant remediation schema alignment.
 
 Covers:
-- Migration SQL contains soft-dedup columns (deduped_at, deduped_into_job_id, deduped_reason)
-- Migration SQL creates partial unique index with WHERE deduped_at IS NULL
-- No migration creates an unsafe total unique analysis_jobs_study_user_clinic_uniq
-  without a predicate
+- Migration SQL adds soft-dedup columns (deduped_at, deduped_into_job_id, deduped_reason)
+- Migration SQL does NOT create analysis_jobs_study_user_clinic_uniq (defered to post-remediation)
+- No migration creates a total (un-predicated) unique index on analysis_jobs
 - Migration SQL adds branding_config.clinic_id and backfills from usuarios
 - Migration SQL creates idx_branding_config_clinic_id
-- Startup code (create_auth_tables) uses partial unique index, not total
+- Migration SQL adds analysis_jobs.clinic_id BEFORE soft-dedup columns (ordering)
+- Migration has post-remediation comments indicating future unique index step
+- Startup code (create_auth_tables) does NOT create analysis_jobs_study_user_clinic_uniq
+- Startup code adds clinic_id and soft-dedup columns but defers unique index
 - Startup code (create_auth_tables) adds soft-dedup columns for analysis_jobs
 - Startup code creates branding_config table WITH clinic_id column
 """
@@ -81,39 +83,50 @@ class TestMigration005SoftDedupColumns(unittest.TestCase):
             )
 
 
-class TestMigration005PartialUniqueIndex(unittest.TestCase):
-    """Migration must create analysis_jobs_study_user_clinic_uniq as partial."""
+class TestMigration005NoPrematureUniqueIndex(unittest.TestCase):
+    """Migration must NOT create analysis_jobs_study_user_clinic_uniq yet.
 
-    def test_migration_creates_partial_unique_index(self):
-        """The unique index must have WHERE deduped_at IS NULL predicate."""
-        sql = _read_migration_005()
-        # Must find the CREATE UNIQUE INDEX statement (not comment lines)
-        create_idx_matches = re.findall(
-            r"CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+analysis_jobs_study_user_clinic_uniq",
-            sql,
-            re.IGNORECASE,
-        )
-        self.assertGreaterEqual(
-            len(create_idx_matches), 1,
-            "Must have CREATE UNIQUE INDEX IF NOT EXISTS analysis_jobs_study_user_clinic_uniq",
-        )
-        self.assertIn("WHERE deduped_at IS NULL", sql)
+     The partial unique index WHERE deduped_at IS NULL cannot be created
+     until AFTER production data remediation marks all non-canonical rows
+     with deduped_at. Creating it now would fail on the 41 existing
+     rows that still have deduped_at = NULL.
+    """
 
-    def test_migration_partial_index_includes_clinic_id_and_where(self):
-        """The partial unique index must include clinic_id and a WHERE clause."""
+    def test_migration_does_not_create_analysis_jobs_study_user_clinic_uniq(self):
+        """Migration must NOT contain CREATE UNIQUE INDEX for
+        analysis_jobs_study_user_clinic_uniq (neither total nor partial).
+        This index is deferred to a post-remediation migration."""
         sql = _read_migration_005()
-        # Find the actual CREATE UNIQUE INDEX statement (not comment)
-        match = re.search(
-            r"CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+analysis_jobs_study_user_clinic_uniq\s*"
-            r"ON\s+analysis_jobs\s*\([^)]*clinic_id[^)]*\)\s*"
-            r"WHERE\s+deduped_at\s+IS\s+NULL",
-            sql,
-            re.IGNORECASE | re.DOTALL,
-        )
-        self.assertIsNotNone(
-            match,
-            "Must find: CREATE UNIQUE INDEX ... analysis_jobs_study_user_clinic_uniq "
-            "ON analysis_jobs (...clinic_id...) WHERE deduped_at IS NULL",
+        # Must NOT have CREATE UNIQUE INDEX ... analysis_jobs_study_user_clinic_uniq
+        # in executable SQL. SQL comments (lines starting with --) are allowed
+        # to reference the future index as documentation.
+        for stmt in sql.split(";"):
+            # Strip comment lines to isolate executable SQL
+            executable_lines = "\n".join(
+                line for line in stmt.split("\n")
+                if not line.strip().startswith("--")
+            ).strip()
+            if not executable_lines:
+                continue
+            stmt_upper = executable_lines.upper()
+            if "CREATE" in stmt_upper and "UNIQUE" in stmt_upper and "INDEX" in stmt_upper:
+                self.assertNotIn(
+                    "ANALYSIS_JOBS_STUDY_USER_CLINIC_UNIQ",
+                    stmt_upper,
+                    "Migration must NOT create analysis_jobs_study_user_clinic_uniq "
+                    "yet — it must be deferred to a post-remediation migration. "
+                    f"Found: {executable_lines[:200]}"
+                )
+
+    def test_migration_has_post_remediation_note(self):
+        """Migration must contain comments documenting that the unique index
+        is a post-remediation step, NOT created in this migration."""
+        sql = _read_migration_005()
+        # Must reference "post-remediation" or "POST-REMEDIATION" somewhere
+        self.assertTrue(
+            "post-remediation" in sql.lower() or "POST-REMEDIATION" in sql.upper(),
+            "Migration must contain a comment indicating the unique index "
+            "is a post-remediation step"
         )
 
 
@@ -148,8 +161,66 @@ class TestMigration005NoUnsafeTotalUniqueIndex(unittest.TestCase):
                             "WHERE",
                             stmt_upper,
                             f"Migration {i}: analysis_jobs_study_user_clinic_uniq MUST have "
-                            f"a WHERE clause. Found: {stmt.strip()[:200]}",
+                            f"a WHERE clause. Found: {stmt.strip()[:200]}"
                         )
+
+
+class TestMigration005ColumnOrdering(unittest.TestCase):
+    """analysis_jobs.clinic_id must appear BEFORE soft-dedup columns in the
+    migration to ensure it exists when referenced by future indexes."""
+
+    def test_clinic_id_appears_before_dedup_columns_in_migration(self):
+        """analysis_jobs.clinic_id ALTER must come BEFORE deduped_at
+        in the migration SQL, because future indexes reference clinic_id."""
+        sql = _read_migration_005()
+        # Find position of "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id"
+        # and "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS deduped_at"
+        clinic_match = re.search(
+            r"ALTER\s+TABLE\s+analysis_jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+clinic_id",
+            sql, re.IGNORECASE,
+        )
+        dedup_match = re.search(
+            r"ALTER\s+TABLE\s+analysis_jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+deduped_at",
+            sql, re.IGNORECASE,
+        )
+        self.assertIsNotNone(
+            clinic_match,
+            "Migration must include ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id"
+        )
+        self.assertIsNotNone(
+            dedup_match,
+            "Migration must include ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS deduped_at"
+        )
+        self.assertLess(
+            clinic_match.start(),
+            dedup_match.start(),
+            "analysis_jobs.clinic_id must appear BEFORE deduped_at in migration"
+        )
+
+    def test_clinic_id_appears_before_any_where_clause_referencing_it(self):
+        """clinic_id column must be created before any index or constraint
+        that references it in the migration."""
+        sql = _read_migration_005()
+        clinic_alter = re.search(
+            r"ALTER\s+TABLE\s+analysis_jobs\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+clinic_id",
+            sql, re.IGNORECASE,
+        )
+        self.assertIsNotNone(clinic_alter, "Migration must create analysis_jobs.clinic_id")
+        # Since we removed the unique index, this should pass trivially,
+        # but we guard against future regressions.
+        # Any CREATE INDEX or CREATE UNIQUE INDEX referencing analysis_jobs and clinic_id
+        # must come after clinic_alter
+        idx_matches = list(re.finditer(
+            r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+\w+\s+"
+            r"ON\s+analysis_jobs\s*\([^)]*clinic_id[^)]*\)",
+            sql, re.IGNORECASE,
+        ))
+        for idx_match in idx_matches:
+            self.assertGreater(
+                idx_match.start(),
+                clinic_alter.start(),
+                "clinic_id index must come after clinic_id column ALTER"
+            )
 
 
 class TestMigration005BrandingConfigClinicId(unittest.TestCase):
@@ -161,7 +232,6 @@ class TestMigration005BrandingConfigClinicId(unittest.TestCase):
         self.assertIn("branding_config", sql)
         self.assertIn("clinic_id UUID", sql)
         # Must use IF NOT EXISTS for idempotency
-        # Match the specific ALTER for branding_config
         alter_match = re.search(
             r"ALTER TABLE branding_config ADD COLUMN IF NOT EXISTS clinic_id UUID",
             sql,
@@ -175,7 +245,6 @@ class TestMigration005BrandingConfigClinicId(unittest.TestCase):
     def test_migration_backfills_branding_config_clinic_id_from_usuarios(self):
         """Migration must backfill branding_config.clinic_id from owner usuarios."""
         sql = _read_migration_005()
-        # Must have an UPDATE ... FROM usuarios WHERE ... bc.clinic_id IS NULL
         self.assertIn("UPDATE branding_config", sql)
         self.assertIn("usuarios", sql)
         self.assertIn("bc.clinic_id IS NULL", sql)
@@ -188,7 +257,6 @@ class TestMigration005BrandingConfigClinicId(unittest.TestCase):
     def test_migration_adds_analysis_jobs_clinic_id(self):
         """Migration must also ensure analysis_jobs.clinic_id exists."""
         sql = _read_migration_005()
-        # Should have ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID
         alter_match = re.search(
             r"ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID",
             sql,
@@ -212,7 +280,7 @@ class TestMigration005IdempotencyAndSafety(unittest.TestCase):
                 self.assertIn(
                     "IF NOT EXISTS",
                     stmt_upper,
-                    f"CREATE INDEX must use IF NOT EXISTS: {stmt.strip()[:200]}",
+                    f"CREATE INDEX must use IF NOT EXISTS: {stmt.strip()[:200]}"
                 )
 
     def test_all_alter_table_add_column_use_if_not_exists(self):
@@ -224,20 +292,18 @@ class TestMigration005IdempotencyAndSafety(unittest.TestCase):
                 self.assertIn(
                     "IF NOT EXISTS",
                     stmt_upper,
-                    f"ALTER TABLE ADD COLUMN must use IF NOT EXISTS: {stmt.strip()[:200]}",
+                    f"ALTER TABLE ADD COLUMN must use IF NOT EXISTS: {stmt.strip()[:200]}"
                 )
 
     def test_migration_has_no_data_deletion(self):
         """Migration must not contain DELETE or DROP statements (remediation is additive)."""
         sql = _read_migration_005()
         sql_upper = sql.upper()
-        # No DELETE statements
         self.assertNotIn(
             "DELETE FROM",
             sql_upper,
             "Migration must not delete data (soft-dedup approach)",
         )
-        # No DROP TABLE or DROP COLUMN statements
         self.assertNotIn(
             "DROP TABLE",
             sql_upper,
@@ -248,8 +314,9 @@ class TestMigration005IdempotencyAndSafety(unittest.TestCase):
 # ─── Startup code alignment tests ────────────────────────────────────────
 
 
-class TestStartupCodePartialUniqueIndex(unittest.TestCase):
-    """Startup code must use partial unique index with WHERE deduped_at IS NULL."""
+class TestStartupCodeDeferredUniqueIndex(unittest.TestCase):
+    """Startup code must NOT create analysis_jobs_study_user_clinic_uniq
+    before production data remediation marks duplicates."""
 
     def _read_auth_service_source(self) -> str:
         """Read app/auth/service.py source without importing (avoids Settings validation)."""
@@ -259,13 +326,30 @@ class TestStartupCodePartialUniqueIndex(unittest.TestCase):
         with open(service_path, "r") as f:
             return f.read()
 
-    def test_create_auth_tables_uses_partial_unique_index(self):
-        """create_auth_tables must create analysis_jobs_study_user_clinic_uniq
-        with WHERE deduped_at IS NULL predicate, NOT a total unique index."""
+    def test_create_auth_tables_does_not_create_unique_index(self):
+        """create_auth_tables must NOT create analysis_jobs_study_user_clinic_uniq
+        — even as a partial index. This is deferred to post-remediation."""
         source = self._read_auth_service_source()
-        # Must contain the partial unique index creation with WHERE clause
-        self.assertIn("deduped_at IS NULL", source)
-        self.assertIn("analysis_jobs_study_user_clinic_uniq", source)
+        # Must NOT contain a CREATE UNIQUE INDEX for analysis_jobs_study_user_clinic_uniq
+        # as executable SQL (comments mentioning it as "do not create" are fine)
+        # Search for the pattern in non-comment lines
+        pattern = re.compile(
+            r'CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+'
+            r'analysis_jobs_study_user_clinic_uniq',
+            re.IGNORECASE,
+        )
+        # Only check non-comment lines (lines not starting with #)
+        for line in source.split('\n'):
+            stripped = line.strip()
+            # Skip Python comment lines
+            if stripped.startswith('#') or stripped.startswith('"') or stripped.startswith("'"):
+                continue
+            # Check string literals that contain SQL
+            if pattern.search(stripped):
+                self.fail(
+                    f"create_auth_tables must NOT create analysis_jobs_study_user_clinic_uniq "
+                    f"yet. Found in executable line: {stripped[:200]}"
+                )
 
     def test_create_auth_tables_adds_dedup_columns(self):
         """create_auth_tables must add deduped_at, deduped_into_job_id,
@@ -275,12 +359,42 @@ class TestStartupCodePartialUniqueIndex(unittest.TestCase):
         self.assertIn("deduped_into_job_id", source)
         self.assertIn("deduped_reason TEXT", source)
 
+    def test_create_auth_tables_adds_clinic_id_before_dedup(self):
+        """create_auth_tables must add analysis_jobs.clinic_id before
+        soft-dedup columns, ensuring correct ordering."""
+        source = self._read_auth_service_source()
+        clinic_pos = source.find("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS clinic_id UUID")
+        dedup_pos = source.find("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS deduped_at TIMESTAMPTZ")
+        self.assertGreater(clinic_pos, -1, "Must add analysis_jobs.clinic_id column")
+        self.assertGreater(dedup_pos, -1, "Must add analysis_jobs.deduped_at column")
+        self.assertLess(
+            clinic_pos, dedup_pos,
+            "clinic_id column must be added BEFORE deduped_at in create_auth_tables"
+        )
+
+    def test_create_auth_tables_has_post_remediation_comment(self):
+        """Startup code must have a comment explaining the unique index
+        is deferred to post-remediation, not auto-created."""
+        source = self._read_auth_service_source()
+        # Must contain a comment referencing post-remediation or DO NOT CREATE
+        lines = source.split('\n')
+        has_post_remediation_comment = any(
+            'analysis_jobs_study_user_clinic_uniq' in line
+            and ('post-remediation' in line.lower() or 'DO NOT CREATE' in line)
+            for line in lines
+        )
+        self.assertTrue(
+            has_post_remediation_comment,
+            "Startup code must contain a comment explaining that "
+            "analysis_jobs_study_user_clinic_uniq is deferred to post-remediation"
+        )
+
     def test_create_auth_tables_no_unsafe_total_unique_index(self):
         """create_auth_tables must NOT create an unsafe total unique index on
         analysis_jobs (study_instance_uid, usuario_id, clinic_id) without
         a WHERE clause."""
         source = self._read_auth_service_source()
-        # Find any CREATE UNIQUE INDEX on analysis_jobs for study_user_clinic
+        # Search for any CREATE UNIQUE INDEX on analysis_jobs for study_user_clinic
         # that does NOT have WHERE deduped_at IS NULL
         pattern = re.compile(
             r"CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+"
@@ -293,7 +407,6 @@ class TestStartupCodePartialUniqueIndex(unittest.TestCase):
             # Get the text after the closing paren of the ON clause
             after_match = source[match.end():]
             # The next significant token must be WHERE deduped_at IS NULL
-            # (not just a newline/whitespace then end of statement)
             after_stripped = after_match.strip()
             if not after_stripped.upper().startswith("WHERE"):
                 # This is an unsafe total unique index
