@@ -2,7 +2,7 @@
 
 > Sistema clínico de análisis automatizado de imágenes DICOM con inteligencia artificial, gestión de informes médicos y pagos integrados. Desplegado en producción en [imagiax.dev](https://imagiax.dev).
 
-> **Nuevo equipo?** Lee el paquete de handoff en [`docs/handoff/`](docs/handoff/README.md) — estado de deploy, gap de migraciones y próximos pasos.
+> **Nuevo equipo?** Lee primero el paquete de handoff en [`docs/handoff/`](docs/handoff/README.md). Ese paquete es la referencia vigente para estado de deploy, gap de migraciones y próximos pasos. Las secciones históricas de este README pueden describir la arquitectura legacy.
 
 ---
 
@@ -135,6 +135,8 @@ IMAGIAX_PRECIO_SCAN=990
 ---
 
 ## Deploy en producción
+
+> **Alto:** para handoff y continuidad, esta sección queda supersedida por [`docs/handoff/DEPLOYMENT_STATUS.md`](docs/handoff/DEPLOYMENT_STATUS.md). No ejecutes estos pasos en producción sin resolver primero el mismatch `api.main` vs `app.main` y el gap de migraciones documentado.
 
 ### Requisitos
 - Docker + Docker Compose v2

@@ -14,6 +14,27 @@
 - [ ] GitHub access to `VCTorres-Dev/imagiax_dev` (to publish the release).
 - [ ] Production DB access (`psql` on `postgres-imagiax`).
 - [ ] A populated `.env.production` on the host (never commit it).
+- [ ] Access to GitHub Releases for `handoff-2026-06-27`.
+- [ ] Ability to create and verify PostgreSQL backups under `/root/imagiax/_deploy_backups/`.
+
+## Required environment matrix
+
+Use `.env.example` as the baseline and never copy real values into git.
+
+| Variable | Environment | Required | Purpose |
+|----------|-------------|----------|---------|
+| `APP_ENV` | production | Yes | Must be `production` in production. |
+| `POSTGRES_URL` | all | Yes | Async database connection for FastAPI. |
+| `POSTGRES_PASSWORD` | docker compose | Yes | PostgreSQL container password. |
+| `JWT_SECRET` | all | Yes | JWT signing secret, minimum 32 chars. |
+| `JWT_EXPIRE_HOURS` / `JWT_REMEMBER_HOURS` | all | Recommended | Token/session lifetime. |
+| `IMAGIAX_BOOTSTRAP_MODE` | production | Yes | Must be absent or `0` in production. |
+| `IMAGIAX_PILOT_CLINIC_ID` | production | Yes for current backfill path | Must be non-zero until startup backfill is redesigned. |
+| `IMAGIAX_PAYMENT_MODE` | production | Yes | Must be `production` when `APP_ENV=production`. |
+| `CORS_ORIGINS` | production | Yes | Explicit origins only, no wildcard. |
+| `ORTHANC_BASE_URL`, `ORTHANC_USER`, `ORTHANC_PASSWORD` | all | Yes if Orthanc auth enabled | PACS access. |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_PRO_MODEL` | AI flows | Yes for AI report generation | Gemini LLM integration. |
+| `MP_*`, `TBK_*` | payments | Required if payments enabled | MercadoPago and Transbank. |
 
 ## P0 — deploy blockers (must resolve before any automated deploy)
 
@@ -44,8 +65,20 @@
 - **Acceptance:** At least one clinic has branding applied and visible end-to-end.
 
 ### P1.3 Package and publish the GitHub Release
-- **Action:** Build release artifacts from `c0482551b` only (no workspace tarballs), attach the 4 handoff docs, the manifest, and the source archive. Generate SHA256 checksums. Run the verification checklist before publishing.
-- **Acceptance:** Draft release verified by a second reviewer; checksums match; tag points to `c0482551b`. See [`MANIFEST.md`](./MANIFEST.md).
+- **Action:** Maintain release `handoff-2026-06-27`, attach standalone docs and `CHECKSUMS_SHA256.txt`, and verify the GitHub-generated source archive. Do not build workspace tarballs.
+- **Acceptance:** Release assets are present, checksums match, tag points to `7f960427a`, and release notes state `c0482551b` as the application baseline. See [`MANIFEST.md`](./MANIFEST.md).
+
+## PR / issue reference map
+
+| Ref | Purpose | Why it matters |
+|-----|---------|----------------|
+| Issue #11 | Tenant isolation for MVP readiness | Approved feature scope for tenant validation. |
+| PR #14 | Clean MVP branding and tenant integration | Main application baseline. |
+| Issue #15 | Production remediation schema alignment | Approved hotfix scope for safe tenant remediation. |
+| PR #16 | Tenant remediation schema hotfix | Adds migration 005 and soft-dedup support. |
+| Issue #17 | Initial handoff package | Created first handoff docs. |
+| PR #18 | Handoff continuation package | Adds `docs/handoff/`. |
+| Issue #19 | Handoff release/package corrections | Tracks this release/package hardening pass. |
 
 ## P2 — medium term (1–3 months)
 
@@ -67,4 +100,4 @@ These were completed and deployed in production prior to the handoff — verify,
 
 ## Next step
 
-Resolve P0.1, then P0.2 in parallel. Do not publish the release until P0 items are documented or resolved.
+Resolve P0.1, then P0.2 in parallel. Keep the handoff release assets/checksums current as docs evolve.
