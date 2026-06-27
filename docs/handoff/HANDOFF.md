@@ -14,11 +14,13 @@
 | Field | Value |
 |-------|-------|
 | Repository | `https://github.com/VCTorres-Dev/imagiax_dev.git` |
-| Canonical commit | `c0482551ba1dae1d8d74ffa92138f06f617e06ba` (tip of `main`) |
-| Commit subject | `Merge pull request #16 from VCTorres-Dev/fix/tenant-remediation-schema` |
-| Distribution | GitHub Release (not yet published — see [`MANIFEST.md`](./MANIFEST.md)) |
+| Application baseline commit | `c0482551ba1dae1d8d74ffa92138f06f617e06ba` |
+| Application baseline subject | `Merge pull request #16 from VCTorres-Dev/fix/tenant-remediation-schema` |
+| Handoff docs commit | `7f960427a4262d78136ea7d4e165d963d4a81b35` (current tip of `main`) |
+| Handoff docs subject | `Merge pull request #18 from VCTorres-Dev/docs/handoff-export` |
+| Release | [`handoff-2026-06-27`](https://github.com/VCTorres-Dev/imagiax_dev/releases/tag/handoff-2026-06-27) — published |
 
-> The handoff docs you are reading are committed **after** `c0482551b`. Treat `c0482551b` as the application code source of truth and the handoff commit as a documentation-only addition layered on top. No runtime code is changed by the handoff commit.
+> The GitHub Release `handoff-2026-06-27` is **published** and points to the handoff docs commit `7f960427a`. Treat `c0482551b` as the application-code source of truth and `7f960427a` as a documentation-only addition layered on top of it. No runtime code is changed by either commit. See [`MANIFEST.md`](./MANIFEST.md) for the release's asset list and checksum procedure.
 
 ## What is included
 
@@ -76,19 +78,36 @@ Deploying `c0482551b` directly would run `app.main:create_app`, which does **not
 
 ## Getting started locally
 
+The local compose file in this repository starts **infrastructure only** (`orthanc` and `postgres`). It does not start the full API and OHIF application by itself. Treat local startup as three separate layers until the deploy-source decision is resolved.
+
+### 1. Clone the handoff source
+
 ```bash
 git clone https://github.com/VCTorres-Dev/imagiax_dev.git
 cd imagiax_dev
-git checkout c0482551ba1dae1d8d74ffa92138f06f617e06ba
-
-# Local stack (HTTP, no SSL)
-cd "OHIF Medical Imaging Viewer/orthanc-imagiax"
-docker compose up -d --build
-# API:    http://localhost:8010
-# OHIF:   http://localhost:3000
-# Orthanc: http://localhost:8042
-# Swagger: http://localhost:8010/docs
+git checkout handoff-2026-06-27
 ```
+
+### 2. Start local infrastructure
+
+```bash
+cd "OHIF Medical Imaging Viewer/orthanc-imagiax"
+docker compose up -d
+# Orthanc:  http://localhost:8042
+# Postgres: localhost:5432
+```
+
+### 3. Start backend and OHIF explicitly
+
+```bash
+# Backend, from repo root, after setting a local .env based on .env.example:
+uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8010
+
+# OHIF: verify the current OHIF workspace before running.
+# The production viewer/runtime still needs source reconciliation.
+```
+
+If this fails, do not patch blindly. First resolve the P0 source/runtime mismatch in [`DEPLOYMENT_STATUS.md`](./DEPLOYMENT_STATUS.md).
 
 ### Test entry points
 
@@ -105,7 +124,7 @@ docker compose up -d --build
 1. Reconcile the deploy-source decision (`app.main` vs `api.main`).
 2. Recover or document migrations 006–010.
 3. Close the clinic pilot bootstrap (`IMAGIAX_BOOTSTRAP_MODE`).
-4. Package and publish a GitHub Release from `c0482551b`.
+4. Maintain the published GitHub Release `handoff-2026-06-27` and its standalone assets/checksums.
 
 Full actionable list: [`CONTINUATION_CHECKLIST.md`](./CONTINUATION_CHECKLIST.md).
 

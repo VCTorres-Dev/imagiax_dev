@@ -10,7 +10,8 @@
 | Source-of-truth commit | `c0482551ba1dae1d8d74ffa92138f06f617e06ba` (tip of `main`) |
 | Production running `c0482551b`? | **No** — production runs an older runtime (see below) |
 | Confirmed remediations in production | Tenant scoping, branding backend, security hardening, rate-limit tuning, report/PHI access guards |
-| Deploy performed by this handoff? | **No** — docs-only change, no deploy, no release published |
+| Deploy performed by this handoff? | **No** — docs-only release; no production deploy was performed |
+| Handoff Release | `handoff-2026-06-27` at `7f960427a4262d78136ea7d4e165d963d4a81b35` |
 
 ## The source / runtime mismatch (critical)
 
@@ -53,8 +54,43 @@ curl -fsS https://imagiax.dev/api/salud/detalle
 | `ohif-imagiax` | OHIF viewer |
 | `nginx-imagiax` | Reverse proxy / SSL |
 
-- Production compose: `/root/imagiax/OHIF Medical Imaging Viewer/orthanc-imagiax/docker-compose.prod.yml`
+- Production root: `/root/imagiax`
+- Production compose observed during remediation: `/root/imagiax/OHIF Medical Imaging Viewer/orthanc-imagiax/docker-compose.prod.PRODUCTION.yml`
+- Repository compose file: `OHIF Medical Imaging Viewer/orthanc-imagiax/docker-compose.prod.yml`
 - Production does **not** use bind mounts for backend; backend code is baked into the Docker image. Applying a backend change normally requires copying files to the source tree, rebuilding `fastapi`, and restarting only `fastapi`.
+
+## Safe source comparison procedure
+
+Before any backend deploy, capture production without printing secrets:
+
+```bash
+# On production host; do not cat .env files.
+docker inspect fastapi-imagiax --format '{{.Image}} {{.Config.Cmd}}'
+docker ps --filter name=fastapi-imagiax
+find /root/imagiax -maxdepth 4 -type d -name api -o -name app
+```
+
+Then compare route surfaces and entry points from a safe copy of production source, not in-place editing:
+
+1. Copy only source code needed for comparison to a temporary review directory. Exclude `.env*`, uploads, DICOM, dumps, backups, and caches.
+2. Inventory routes from both candidates (`api.main` and `app.main`) using local import/safe static grep.
+3. Decide one authoritative runtime and document the decision before rebuilding.
+4. Rebuild only `fastapi` after backup and explicit approval.
+
+Do not deploy by copying an entire workstation folder to production.
+
+## Runtime rollback runbook
+
+Before a backend deploy, capture:
+
+| Item | Command / Location |
+|------|--------------------|
+| Current FastAPI image | `docker inspect fastapi-imagiax --format '{{.Image}}'` |
+| Current container status | `docker ps --filter name=fastapi-imagiax` |
+| DB backup | `/root/imagiax/_deploy_backups/db-pre-tenant-remediation-20260617T222541Z.dump` already exists; take a fresh backup before new deploys |
+| Runtime config backup | `/root/imagiax/_deploy_backups/.env.production.20260617T235619Z.runtime-gates.bak` already exists; take a fresh backup before edits |
+
+Rollback rule: if `/api/salud` or `/api/health/db` fails after deploy, stop feature work, restore the previous FastAPI image/config, and re-run smoke checks before investigating new changes.
 
 ## Exact next deploy-source decision (P0)
 
@@ -66,10 +102,10 @@ Before any deployment, the receiving team **must** resolve:
 2. **Reconcile migrations 006–010** before running `alembic upgrade head` or any schema automation — see [`MIGRATION_GAP.md`](./MIGRATION_GAP.md).
 3. **Verify** with logs, DB inspection, and `/salud` after the change. Compare local vs production with `sha256sum` markers — do not assume.
 
-## Rollback references
+## Release rollback references
 
-- Rollback of this handoff change: delete the draft release/assets/tag (if created), close the docs branch/PR, keep `main` at `c0482551b`. This change deploys no code.
-- Runtime rollback (out of scope here): production restore scripts and DB backups exist on the host. Always take a backup and have a clear rollback before touching production.
+- Handoff release rollback: replace incorrect assets or delete the release assets; this does not affect production.
+- Runtime rollback: use the runbook above. Always take a fresh backup before touching production.
 
 ## Blocked by
 
