@@ -2,6 +2,8 @@
 
 > Sistema clínico de análisis automatizado de imágenes DICOM con inteligencia artificial, gestión de informes médicos y pagos integrados. Desplegado en producción en [imagiax.dev](https://imagiax.dev).
 
+> **Nuevo equipo?** Lee el paquete de handoff en [`docs/handoff/`](docs/handoff/README.md) — estado de deploy, gap de migraciones y próximos pasos.
+
 ---
 
 ## Arquitectura
