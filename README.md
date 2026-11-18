@@ -97,43 +97,6 @@ imagiax_dev/
 
 ---
 
-## Variables de entorno
-
-El archivo `.env.production` **no se versiona** (contiene credenciales). Variables requeridas:
-
-```env
-# Google Gemini
-GEMINI_API_KEY=
-
-# PostgreSQL
-POSTGRES_URL=postgresql://user:pass@postgres:5432/imagiax
-POSTGRES_PASSWORD=
-
-# Orthanc
-ORTHANC_BASE_URL=http://orthanc:8042
-
-# URLs públicas
-IMAGIAX_BASE_URL=https://imagiax.dev/api
-CORS_ORIGINS=https://imagiax.dev,https://www.imagiax.dev
-IMAGIAX_VIEWER_URL=/
-
-# MercadoPago
-MP_PUBLIC_KEY=
-MP_ACCESS_TOKEN=
-MP_WEBHOOK_SECRET=
-
-# Transbank
-TBK_ENVIRONMENT=integration   # o "production"
-TBK_MALL_COMMERCE_CODE=
-TBK_CHILD_COMMERCE_CODE=
-TBK_API_KEY=
-
-# Precio por análisis (CLP)
-IMAGIAX_PRECIO_SCAN=990
-```
-
----
-
 ## Deploy en producción
 
 > **Alto:** para handoff y continuidad, esta sección queda supersedida por [`docs/handoff/DEPLOYMENT_STATUS.md`](docs/handoff/DEPLOYMENT_STATUS.md). No ejecutes estos pasos en producción sin resolver primero el mismatch `api.main` vs `app.main` y el gap de migraciones documentado.
